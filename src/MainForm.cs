@@ -62,7 +62,7 @@ namespace PixelPatchStudio
 
         private void BuildUi()
         {
-            Text = "PhotoSense 1.0.14 · Photoshop AI 局部重绘";
+            Text = "PhotoSense 1.0.15 · Photoshop AI 局部重绘";
             Icon = AppIcon.Create();
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(1440, 900);
@@ -79,7 +79,7 @@ namespace PixelPatchStudio
             Panel top = new Panel { Dock = DockStyle.Top, Height = 48, BackColor = UiTheme.Header };
             Label brand = new Label { Text = "PHOTOSENSE", Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold), ForeColor = UiTheme.Text, AutoSize = true, Location = new Point(18, 12), BackColor = Color.Transparent };
             Label subtitle = new Label { Text = "Get Good Get PhotoSense.", Font = new Font("Segoe UI", 7.5f, FontStyle.Regular), ForeColor = UiTheme.Subtle, AutoSize = true, Location = new Point(142, 17), BackColor = Color.Transparent };
-            RoundedLabel version = new RoundedLabel { Text = "V1.0.14", Size = new Size(68, 22), Location = new Point(390, 13), FillColor = Color.FromArgb(28, 33, 27), TextColor = UiTheme.AccentBright, Radius = 5f };
+            RoundedLabel version = new RoundedLabel { Text = "V1.0.15", Size = new Size(68, 22), Location = new Point(390, 13), FillColor = Color.FromArgb(28, 33, 27), TextColor = UiTheme.AccentBright, Radius = 5f };
             Label keyHint = new Label { Text = "B  画笔    E  橡皮    [ ]  笔刷    空格  平移", Dock = DockStyle.Right, Width = 340, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(0, 0, 18, 0), ForeColor = UiTheme.Subtle, Font = new Font("Microsoft YaHei UI", 8f), BackColor = Color.Transparent };
             top.Controls.Add(keyHint); top.Controls.Add(version); top.Controls.Add(subtitle); top.Controls.Add(brand);
             Controls.Add(top);
@@ -431,7 +431,7 @@ namespace PixelPatchStudio
                 using (Bitmap mask = canvas.GetMaskCopy())
                 using (ImageApiClient client = new ImageApiClient(settings.ApiTimeoutSeconds))
                 {
-                    status.Text = "正在优化接口图片并调用 " + settings.Provider + " · " + settings.Model + "…";
+                    status.Text = "正在优化接口图片并调用 " + ProviderDescription() + "…";
                     Bitmap apiResult = await client.GenerateAsync(source, mask, prompt.Text, settings, key, cancellation.Token);
                     if (useEsrgan.Checked)
                     {
@@ -567,7 +567,15 @@ namespace PixelPatchStudio
             if (provider.SelectedIndex < 0) return;
             settings.Provider = provider.SelectedIndex == 1 ? "Nano Banana" : "GPT Image 2";
             store.Save(settings);
-            status.Text = "当前服务：" + settings.Provider + " · " + settings.Model;
+            status.Text = "当前服务：" + ProviderDescription();
+        }
+
+        private string ProviderDescription()
+        {
+            if (settings.SelectedProvider != ApiProvider.NanoBanana)
+                return settings.Provider + " · " + settings.Model;
+            string imageSize = GeminiResolution.Normalize(settings.GeminiImageSize);
+            return settings.Provider + " · " + settings.Model + " · " + (imageSize == "Auto" ? "自动分辨率" : imageSize);
         }
 
         private void UpdateProviderUi()
@@ -703,11 +711,11 @@ namespace PixelPatchStudio
                 string logDirectory = Path.Combine(store.DataDirectory, "Logs");
                 Directory.CreateDirectory(logDirectory);
                 logPath = Path.Combine(logDirectory, "errors.log");
-                File.AppendAllText(logPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " · PhotoSense 1.0.14\r\n" + ex + "\r\n\r\n");
+                File.AppendAllText(logPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " · PhotoSense 1.0.15\r\n" + ex + "\r\n\r\n");
             }
             catch { }
             string details = ex.Message + (IsPhotoshopStorageError(ex) ? LowDiskWarning() : "") + (string.IsNullOrEmpty(logPath) ? "" : "\n\n诊断记录：" + logPath);
-            MessageBox.Show(this, details, "PhotoSense 1.0.14", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, details, "PhotoSense 1.0.15", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         private static bool IsPhotoshopStorageError(Exception ex)

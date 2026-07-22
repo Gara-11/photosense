@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
@@ -13,6 +14,7 @@ namespace PixelPatchStudio
         private TextBox baseUrl;
         private TextBox endpoint;
         private TextBox model;
+        private ComboBox geminiImageSize;
         private TextBox apiKey;
         private Label keyState;
         private TextBox esrganPath;
@@ -62,11 +64,11 @@ namespace PixelPatchStudio
             columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             columns.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             content.Controls.Add(columns);
-            CardPanel apiCard = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 7, 0), Padding = new Padding(16, 12, 16, 12) };
-            CardPanel upscaleCard = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(7, 0, 0, 0), Padding = new Padding(16, 12, 16, 12) };
+            CardPanel apiCard = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(0, 0, 7, 0), Padding = new Padding(16, 12, 16, 12), AutoScroll = true };
+            CardPanel upscaleCard = new CardPanel { Dock = DockStyle.Fill, Margin = new Padding(7, 0, 0, 0), Padding = new Padding(16, 12, 16, 12), AutoScroll = true };
             columns.Controls.Add(apiCard, 0, 0); columns.Controls.Add(upscaleCard, 1, 0);
 
-            TableLayoutPanel apiTable = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 8, BackColor = UiTheme.Card };
+            TableLayoutPanel apiTable = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 9, BackColor = UiTheme.Card };
             apiTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 86));
             apiTable.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             apiCard.Controls.Add(apiTable);
@@ -82,13 +84,17 @@ namespace PixelPatchStudio
             baseUrl = Field(); AddRow(apiTable, 2, "中转 URL", baseUrl);
             endpoint = Field(); AddRow(apiTable, 3, "接口", endpoint);
             model = Field(); AddRow(apiTable, 4, "模型", model);
+            geminiImageSize = Combo();
+            geminiImageSize.Items.AddRange(GeminiResolution.DisplayNames);
+            geminiImageSize.SelectedIndex = GeminiResolution.IndexOf(settings.GeminiImageSize);
+            AddRow(apiTable, 5, "生成分辨率", geminiImageSize);
 
             Panel keyPanel = new Panel { Dock = DockStyle.Fill, Height = 64 };
             apiKey = Field(); apiKey.UseSystemPasswordChar = true; apiKey.Dock = DockStyle.Top;
             keyState = new Label { Dock = DockStyle.Bottom, Height = 24, ForeColor = UiTheme.Muted, TextAlign = ContentAlignment.MiddleLeft };
             Button clearKey = SmallButton("清除已保存 Key"); clearKey.Dock = DockStyle.Right; clearKey.Width = 130; clearKey.Click += ClearKey;
             keyPanel.Controls.Add(apiKey); keyPanel.Controls.Add(clearKey); keyPanel.Controls.Add(keyState);
-            AddRow(apiTable, 5, "API Key", keyPanel);
+            AddRow(apiTable, 6, "API Key", keyPanel);
 
             Label note = new Label
             {
@@ -96,9 +102,44 @@ namespace PixelPatchStudio
                 MaximumSize = new Size(270, 0),
                 ForeColor = UiTheme.Subtle,
                 Font = new Font("Microsoft YaHei UI", 8f),
-                Text = "Key 使用 Windows 当前用户 DPAPI 加密，保存在 %LOCALAPPDATA%\\PixelPatch Studio。更换 EXE 或解压目录不会丢失。Nano Banana 中转接口可使用 {model} 占位符，程序会自动填入模型名。"
+                Text = "Key 使用当前用户 DPAPI 加密并跨版本沿用。Nano Banana 中转可使用 {model} 占位符；4K 需要 Gemini 3 图像模型及中转支持。"
             };
-            apiTable.Controls.Add(note, 1, 6);
+            apiTable.Controls.Add(note, 1, 7);
+            Panel openSourcePanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Height = 40,
+                BackColor = Color.Transparent,
+                Margin = new Padding(0)
+            };
+            Label openSourceDeclaration = new Label
+            {
+                Text = "本软件免费开源 · 第三方 API 费用由服务商决定",
+                Dock = DockStyle.Top,
+                Height = 20,
+                AutoEllipsis = true,
+                ForeColor = UiTheme.Text,
+                Font = new Font("Microsoft YaHei UI", 8.2f, FontStyle.Bold),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            LinkLabel projectLink = new LinkLabel
+            {
+                Text = "GitHub：Gara-11/photosense（点击访问）",
+                Dock = DockStyle.Bottom,
+                Height = 20,
+                LinkColor = UiTheme.AccentBright,
+                ActiveLinkColor = UiTheme.Accent,
+                VisitedLinkColor = UiTheme.AccentBright,
+                Font = new Font("Microsoft YaHei UI", 8.2f, FontStyle.Bold),
+                TabStop = true,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            projectLink.Links.Clear();
+            projectLink.Links.Add(0, projectLink.Text.Length, "https://github.com/Gara-11/photosense/");
+            projectLink.LinkClicked += OpenProjectLink;
+            openSourcePanel.Controls.Add(projectLink);
+            openSourcePanel.Controls.Add(openSourceDeclaration);
+            apiTable.Controls.Add(openSourcePanel, 1, 8);
 
             TableLayoutPanel upscaleTable = new TableLayoutPanel { Dock = DockStyle.Top, AutoSize = true, ColumnCount = 2, RowCount = 7, BackColor = UiTheme.Card };
             upscaleTable.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 86));
@@ -170,6 +211,7 @@ namespace PixelPatchStudio
             }
             apiKey.Text = "";
             keyState.Text = string.IsNullOrEmpty(store.GetApiKey(editingProvider)) ? "尚未保存 Key" : "✓ 已为此服务保存 Key";
+            geminiImageSize.Enabled = editingProvider == ApiProvider.NanoBanana;
         }
 
         private void CommitProviderFields()
@@ -203,6 +245,7 @@ namespace PixelPatchStudio
             settings.RealEsrganDownloadUrl = esrganDownloadUrl.Text.Trim();
             settings.RealEsrganModel = esrganModel.Text.Trim();
             settings.RealEsrganScale = (int)esrganScale.Value;
+            settings.GeminiImageSize = GeminiResolution.Values[Math.Max(0, geminiImageSize.SelectedIndex)];
             settings.UiScalePercent = UiScale.PercentValues[Math.Max(0, uiScale.SelectedIndex)];
             store.Save(settings);
             DialogResult = DialogResult.OK;
@@ -214,6 +257,20 @@ namespace PixelPatchStudio
             store.SetApiKey(editingProvider, "");
             apiKey.Text = "";
             keyState.Text = "尚未保存 Key";
+        }
+
+        private void OpenProjectLink(object sender, LinkLabelLinkClickedEventArgs e)
+        {
+            string url = e.Link.LinkData as string ?? "https://github.com/Gara-11/photosense/";
+            try
+            {
+                Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "无法打开浏览器。请手动访问：\n" + url + "\n\n" + ex.Message,
+                    "PhotoSense 免费开源项目", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
 
         private void BrowseEsrgan(object sender, EventArgs e)

@@ -117,6 +117,11 @@ namespace PixelPatchStudio
                     Application.SetCompatibleTextRenderingDefault(false);
                     SettingsStore store = new SettingsStore();
                     AppSettings settings = store.Load();
+                    if (args.Length > 3 && string.Equals(args[3], "nano-4k", StringComparison.OrdinalIgnoreCase))
+                    {
+                        settings.Provider = "Nano Banana";
+                        settings.GeminiImageSize = "4K";
+                    }
                     using (SettingsDialog dialog = new SettingsDialog(store, settings))
                     {
                         dialog.Show();
@@ -367,6 +372,9 @@ namespace PixelPatchStudio
                 Assert(UiScale.NormalizePercent(125) == 125 && UiScale.NormalizePercent(113) == 0 &&
                     UiScale.PercentValues[UiScale.IndexOfPercent(175)] == 175,
                     "UI Scale 选项归一化失败");
+                Assert(GeminiResolution.Normalize("4k") == "4K" && GeminiResolution.Normalize("unsupported") == "Auto" &&
+                    GeminiResolution.Values[GeminiResolution.IndexOf("2K")] == "2K",
+                    "Nano Banana 分辨率选项归一化失败");
                 using (ModernCheckBox checkBox = new ModernCheckBox())
                 {
                     bool changed = false;
@@ -378,7 +386,8 @@ namespace PixelPatchStudio
                 {
                     GeminiBaseUrl = "https://api.vectorengine.ai/v1",
                     GeminiEndpoint = "/v1beta/models/{model}:generateContent",
-                    GeminiModel = "gemini-3.1-flash-image:generateContent"
+                    GeminiModel = "gemini-3.1-flash-image:generateContent",
+                    GeminiImageSize = "4K"
                 };
                 Assert(ImageApiClient.UsesGeminiGenerateContent(relaySettings), "没有识别 Nano Banana generateContent 中转协议");
                 Assert(ImageApiClient.GeminiRequestUrl(relaySettings) == "https://api.vectorengine.ai/v1beta/models/gemini-3.1-flash-image:generateContent", "Nano Banana 中转请求地址拼接失败");
@@ -388,17 +397,22 @@ namespace PixelPatchStudio
                 Assert(serializedRelay.IndexOf("\"contents\"", StringComparison.Ordinal) >= 0 &&
                     serializedRelay.IndexOf("\"inline_data\"", StringComparison.Ordinal) >= 0 &&
                     serializedRelay.IndexOf("\"responseModalities\"", StringComparison.Ordinal) >= 0 &&
+                    serializedRelay.IndexOf("\"responseFormat\"", StringComparison.Ordinal) >= 0 &&
+                    serializedRelay.IndexOf("\"imageSize\":\"4K\"", StringComparison.Ordinal) >= 0 &&
                     serializedRelay.IndexOf("\"input\"", StringComparison.Ordinal) < 0,
                     "Nano Banana generateContent 请求体格式错误");
                 AppSettings interactionsSettings = new AppSettings
                 {
                     GeminiBaseUrl = "https://generativelanguage.googleapis.com",
                     GeminiEndpoint = "/v1beta/interactions",
-                    GeminiModel = "gemini-3.1-flash-image"
+                    GeminiModel = "gemini-3.1-flash-image",
+                    GeminiImageSize = "2K"
                 };
                 Assert(!ImageApiClient.UsesGeminiGenerateContent(interactionsSettings), "官方 Interactions 协议被错误识别为 generateContent");
                 string serializedInteractions = testJson.Serialize(ImageApiClient.BuildGeminiPayload(interactionsSettings, "prompt", "source64", "mask64"));
-                Assert(serializedInteractions.IndexOf("\"input\"", StringComparison.Ordinal) >= 0 && serializedInteractions.IndexOf("\"model\"", StringComparison.Ordinal) >= 0,
+                Assert(serializedInteractions.IndexOf("\"input\"", StringComparison.Ordinal) >= 0 &&
+                    serializedInteractions.IndexOf("\"model\"", StringComparison.Ordinal) >= 0 &&
+                    serializedInteractions.IndexOf("\"image_size\":\"2K\"", StringComparison.Ordinal) >= 0,
                     "Nano Banana Interactions 请求体格式错误");
                 object sampleGeminiResponse = testJson.DeserializeObject("{\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"aW1hZ2U=\"}}]}}]}");
                 Assert(ImageApiClient.FindImageData(sampleGeminiResponse) == "aW1hZ2U=", "generateContent 图片响应解析失败");
@@ -445,6 +459,7 @@ namespace PixelPatchStudio
                 saved.GeminiBaseUrl = "https://api.vectorengine.ai/v1";
                 saved.GeminiEndpoint = "/v1beta/models";
                 saved.GeminiModel = "test-image-model:generateContent";
+                saved.GeminiImageSize = "4k";
                 saved.UiScalePercent = 125;
                 store.Save(saved);
                 store.SetApiKey(ApiProvider.NanoBanana, "self-test-secret");
@@ -453,6 +468,7 @@ namespace PixelPatchStudio
                     loaded.GeminiEndpoint == "/v1beta/models/{model}:generateContent" && loaded.GeminiModel == "test-image-model",
                     "Nano Banana 中转旧配置迁移失败");
                 Assert(loaded.UiScalePercent == 125, "UI Scale 设置持久化失败");
+                Assert(loaded.GeminiImageSize == "4K", "Nano Banana 分辨率设置持久化失败");
                 Assert(store.GetApiKey(ApiProvider.NanoBanana) == "self-test-secret", "DPAPI Key 持久化失败");
 
                 string placeScript = PhotoshopBridge.BuildPlacePatchScript("C:\\tmp\\patch.png", "PixelPatch", 123);

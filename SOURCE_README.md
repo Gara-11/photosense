@@ -1,4 +1,4 @@
-# PhotoSense 1.0.14 源码说明
+# PhotoSense 1.0.15 源码说明
 
 这是 PhotoSense 的可重新构建源码包。源码包不包含 API Key、Windows 当前用户配置、运行日志、测试截图、编译缓存或历史发布文件。
 

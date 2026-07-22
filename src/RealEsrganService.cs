@@ -158,7 +158,7 @@ namespace PixelPatchStudio
                         handler.AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate;
                         handler.UseProxy = true;
                         client.Timeout = TimeSpan.FromMinutes(15);
-                        client.DefaultRequestHeaders.UserAgent.ParseAdd("PhotoSense/1.0.14");
+                        client.DefaultRequestHeaders.UserAgent.ParseAdd("PhotoSense/1.0.15");
                         using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, url))
                         {
                             request.Headers.ConnectionClose = true;

@@ -15,6 +15,28 @@ namespace PixelPatchStudio
         Erase
     }
 
+    internal static class GeminiResolution
+    {
+        internal static readonly string[] Values = { "Auto", "1K", "2K", "4K" };
+        internal static readonly object[] DisplayNames = { "自动（接口默认）", "1K", "2K", "4K" };
+
+        internal static string Normalize(string value)
+        {
+            string candidate = (value ?? "").Trim();
+            if (string.Equals(candidate, "1K", StringComparison.OrdinalIgnoreCase)) return "1K";
+            if (string.Equals(candidate, "2K", StringComparison.OrdinalIgnoreCase)) return "2K";
+            if (string.Equals(candidate, "4K", StringComparison.OrdinalIgnoreCase)) return "4K";
+            return "Auto";
+        }
+
+        internal static int IndexOf(string value)
+        {
+            string normalized = Normalize(value);
+            for (int i = 0; i < Values.Length; i++) if (Values[i] == normalized) return i;
+            return 0;
+        }
+    }
+
     [Serializable]
     internal sealed class AppSettings
     {
@@ -25,6 +47,7 @@ namespace PixelPatchStudio
         public string GeminiBaseUrl = "https://api.vectorengine.ai";
         public string GeminiEndpoint = "/v1beta/models/{model}:generateContent";
         public string GeminiModel = "gemini-3.1-flash-image";
+        public string GeminiImageSize = "Auto";
         public string RealEsrganPath = "";
         public string RealEsrganDownloadUrl = RealEsrganService.OfficialDownloadUrl;
         public string RealEsrganModel = "realesrgan-x4plus";

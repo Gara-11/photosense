@@ -103,6 +103,7 @@ namespace PixelPatchStudio
             value.GeminiBaseUrl = value.GeminiBaseUrl.Trim().TrimEnd('/');
             value.GeminiEndpoint = value.GeminiEndpoint.Trim();
             value.GeminiModel = value.GeminiModel.Trim();
+            value.GeminiImageSize = GeminiResolution.Normalize(value.GeminiImageSize);
             if (value.GeminiModel.EndsWith(":generateContent", StringComparison.OrdinalIgnoreCase))
                 value.GeminiModel = value.GeminiModel.Substring(0, value.GeminiModel.Length - ":generateContent".Length).TrimEnd('/');
             Uri geminiBase;

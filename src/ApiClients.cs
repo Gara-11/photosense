@@ -184,6 +184,7 @@ namespace PixelPatchStudio
         internal static Dictionary<string, object> BuildGeminiPayload(AppSettings settings, string guardedPrompt, string sourceData, string maskData)
         {
             Dictionary<string, object> payload = new Dictionary<string, object>();
+            string imageSize = GeminiResolution.Normalize(settings == null ? null : settings.GeminiImageSize);
             if (UsesGeminiGenerateContent(settings))
             {
                 payload["contents"] = new object[]
@@ -200,7 +201,18 @@ namespace PixelPatchStudio
                         }
                     }
                 };
-                payload["generationConfig"] = new Dictionary<string, object> { { "responseModalities", new object[] { "TEXT", "IMAGE" } } };
+                Dictionary<string, object> generationConfig = new Dictionary<string, object>
+                {
+                    { "responseModalities", new object[] { "TEXT", "IMAGE" } }
+                };
+                if (imageSize != "Auto")
+                {
+                    generationConfig["responseFormat"] = new Dictionary<string, object>
+                    {
+                        { "image", new Dictionary<string, object> { { "imageSize", imageSize } } }
+                    };
+                }
+                payload["generationConfig"] = generationConfig;
             }
             else
             {
@@ -211,7 +223,9 @@ namespace PixelPatchStudio
                     new Dictionary<string, object> { { "type", "image" }, { "mime_type", "image/png" }, { "data", sourceData } },
                     new Dictionary<string, object> { { "type", "image" }, { "mime_type", "image/png" }, { "data", maskData } }
                 };
-                payload["response_format"] = new Dictionary<string, object> { { "type", "image" } };
+                Dictionary<string, object> responseFormat = new Dictionary<string, object> { { "type", "image" } };
+                if (imageSize != "Auto") responseFormat["image_size"] = imageSize;
+                payload["response_format"] = responseFormat;
             }
             return payload;
         }
