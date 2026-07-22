@@ -1,0 +1,73 @@
+# =========================
+# PhotoSense - .gitignore
+# Visual Studio / C# / .NET
+# =========================
+
+# Visual Studio user files
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build output
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+
+# Visual Studio build results
+*.dll
+*.exe
+*.pdb
+*.cache
+
+# NuGet
+packages/
+*.nupkg
+*.snupkg
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+
+# API keys / secrets
+.env
+.env.*
+secrets.json
+appsettings.local.json
+config.local.json
+*.key
+*.secret
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+
+# macOS
+.DS_Store
+
+# JetBrains / Rider
+.idea/
+*.sln.iml
+
+# Test results
+TestResults/
+coverage/
+coverage.xml
+
+# Publish output
+publish/
+PublishProfiles/
+
+# Local application data / credentials
+credentials.json
+api_keys.json
+apikey.txt
