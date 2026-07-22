@@ -74,6 +74,49 @@ namespace PixelPatchStudio
             }
         }
 
+        public static Bitmap PrepareStyleReference(Bitmap reference, int maxEdge)
+        {
+            if (reference == null) throw new ArgumentNullException("reference");
+            if (maxEdge < 256) throw new ArgumentOutOfRangeException("maxEdge");
+            double scale = Math.Min(1d, maxEdge / (double)Math.Max(reference.Width, reference.Height));
+            int width = Math.Max(1, (int)Math.Round(reference.Width * scale));
+            int height = Math.Max(1, (int)Math.Round(reference.Height * scale));
+            using (Bitmap normalized = ToArgb(reference, width, height, InterpolationMode.HighQualityBicubic))
+            {
+                Bitmap output = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+                int grid = Math.Max(2, Math.Min(8, Math.Min(width, height)));
+                int cells = grid * grid;
+                using (Graphics graphics = Graphics.FromImage(output))
+                {
+                    graphics.CompositingMode = CompositingMode.SourceCopy;
+                    graphics.CompositingQuality = CompositingQuality.HighQuality;
+                    graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    graphics.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    for (int destinationIndex = 0; destinationIndex < cells; destinationIndex++)
+                    {
+                        int sourceIndex = (destinationIndex * 17 + 11) % cells;
+                        int destinationColumn = destinationIndex % grid;
+                        int destinationRow = destinationIndex / grid;
+                        int sourceColumn = sourceIndex % grid;
+                        int sourceRow = sourceIndex / grid;
+                        Rectangle destination = GridCell(width, height, grid, destinationColumn, destinationRow);
+                        Rectangle source = GridCell(width, height, grid, sourceColumn, sourceRow);
+                        graphics.DrawImage(normalized, destination, source, GraphicsUnit.Pixel);
+                    }
+                }
+                return output;
+            }
+        }
+
+        private static Rectangle GridCell(int width, int height, int grid, int column, int row)
+        {
+            int left = column * width / grid;
+            int top = row * height / grid;
+            int right = (column + 1) * width / grid;
+            int bottom = (row + 1) * height / grid;
+            return new Rectangle(left, top, Math.Max(1, right - left), Math.Max(1, bottom - top));
+        }
+
         public static List<PatchTile> SavePatchTiles(Bitmap patch, string directory, int tileSize, float resolution)
         {
             if (tileSize < 256) throw new ArgumentOutOfRangeException("tileSize");

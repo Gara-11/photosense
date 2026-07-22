@@ -64,9 +64,14 @@ namespace PixelPatchStudio
 
         public Task<Bitmap> GenerateAsync(Bitmap source, Bitmap selectionMask, string prompt, AppSettings settings, string apiKey, CancellationToken cancellationToken)
         {
+            return GenerateAsync(source, selectionMask, null, prompt, settings, apiKey, cancellationToken);
+        }
+
+        public Task<Bitmap> GenerateAsync(Bitmap source, Bitmap selectionMask, Bitmap referenceImage, string prompt, AppSettings settings, string apiKey, CancellationToken cancellationToken)
+        {
             if (settings.SelectedProvider == ApiProvider.GptImage2)
-                return GenerateOpenAiAsync(source, selectionMask, prompt, settings, apiKey, cancellationToken);
-            return GenerateGeminiAsync(source, selectionMask, prompt, settings, apiKey, cancellationToken);
+                return GenerateOpenAiAsync(source, selectionMask, referenceImage, prompt, settings, apiKey, cancellationToken);
+            return GenerateGeminiAsync(source, selectionMask, referenceImage, prompt, settings, apiKey, cancellationToken);
         }
 
         public void Dispose()
@@ -74,10 +79,11 @@ namespace PixelPatchStudio
             http.Dispose();
         }
 
-        private async Task<Bitmap> GenerateOpenAiAsync(Bitmap source, Bitmap selectionMask, string prompt, AppSettings settings, string apiKey, CancellationToken cancellationToken)
+        private async Task<Bitmap> GenerateOpenAiAsync(Bitmap source, Bitmap selectionMask, Bitmap referenceImage, string prompt, AppSettings settings, string apiKey, CancellationToken cancellationToken)
         {
             byte[] imageBytes;
             byte[] maskBytes;
+            byte[] referenceBytes = null;
             using (Bitmap requestSource = ResizeForApi(source, 2048, InterpolationMode.HighQualityBicubic))
             using (Bitmap requestSelection = ResizeForApi(selectionMask, 2048, InterpolationMode.NearestNeighbor))
             using (Bitmap apiMask = ImageComposer.PrepareOpenAiMask(requestSelection))
@@ -85,26 +91,19 @@ namespace PixelPatchStudio
                 imageBytes = Png(requestSource);
                 maskBytes = Png(apiMask);
             }
+            if (referenceImage != null)
+            {
+                using (Bitmap requestReference = ResizeForApi(referenceImage, 1280, InterpolationMode.HighQualityBicubic))
+                    referenceBytes = Png(requestReference);
+            }
 
             using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, ApiUrl.Combine(settings.BaseUrl, settings.Endpoint)))
-            using (MultipartFormDataContent form = new MultipartFormDataContent())
+            using (MultipartFormDataContent form = BuildOpenAiForm(settings, prompt, imageBytes, maskBytes, referenceBytes))
             {
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
                 request.Headers.ExpectContinue = false;
                 request.Headers.ConnectionClose = true;
                 request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-                form.Add(new StringContent(settings.Model), "model");
-                form.Add(new StringContent(GuardedPrompt(prompt)), "prompt");
-                form.Add(new StringContent("high"), "quality");
-                form.Add(new StringContent("auto"), "size");
-                form.Add(new StringContent("png"), "output_format");
-
-                ByteArrayContent image = new ByteArrayContent(imageBytes);
-                image.Headers.ContentType = new MediaTypeHeaderValue("image/png");
-                form.Add(image, "image[]", "source.png");
-                ByteArrayContent mask = new ByteArrayContent(maskBytes);
-                mask.Headers.ContentType = new MediaTypeHeaderValue("image/png");
-                form.Add(mask, "mask", "mask.png");
                 request.Content = form;
 
                 try
@@ -126,21 +125,47 @@ namespace PixelPatchStudio
                     if (cancellationToken.IsCancellationRequested) throw;
                     throw new TimeoutException("图像接口超过设置的等待时间。请求地址：" + ApiUrl.Combine(settings.BaseUrl, settings.Endpoint), ex);
                 }
-                catch (HttpRequestException ex) { throw NetworkException(settings, imageBytes.Length + maskBytes.Length, ex); }
-                catch (IOException ex) { throw NetworkException(settings, imageBytes.Length + maskBytes.Length, ex); }
+                catch (HttpRequestException ex) { throw NetworkException(settings, imageBytes.Length + maskBytes.Length + (referenceBytes == null ? 0 : referenceBytes.Length), ex); }
+                catch (IOException ex) { throw NetworkException(settings, imageBytes.Length + maskBytes.Length + (referenceBytes == null ? 0 : referenceBytes.Length), ex); }
             }
         }
 
-        private async Task<Bitmap> GenerateGeminiAsync(Bitmap source, Bitmap selectionMask, string prompt, AppSettings settings, string apiKey, CancellationToken cancellationToken)
+        internal static MultipartFormDataContent BuildOpenAiForm(AppSettings settings, string prompt, byte[] imageBytes, byte[] maskBytes, byte[] referenceBytes)
+        {
+            MultipartFormDataContent form = new MultipartFormDataContent();
+            form.Add(new StringContent(settings.Model), "model");
+            form.Add(new StringContent(BuildOpenAiPrompt(prompt, referenceBytes != null)), "prompt");
+            form.Add(new StringContent("high"), "quality");
+            form.Add(new StringContent("auto"), "size");
+            form.Add(new StringContent("png"), "output_format");
+
+            ByteArrayContent image = new ByteArrayContent(imageBytes);
+            image.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            form.Add(image, "image[]", "source.png");
+            if (referenceBytes != null)
+            {
+                ByteArrayContent reference = new ByteArrayContent(referenceBytes);
+                reference.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+                form.Add(reference, "image[]", "style-reference.png");
+            }
+            ByteArrayContent mask = new ByteArrayContent(maskBytes);
+            mask.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            form.Add(mask, "mask", "mask.png");
+            return form;
+        }
+
+        private async Task<Bitmap> GenerateGeminiAsync(Bitmap source, Bitmap selectionMask, Bitmap referenceImage, string prompt, AppSettings settings, string apiKey, CancellationToken cancellationToken)
         {
             using (Bitmap requestSource = ResizeForApi(source, 2048, InterpolationMode.HighQualityBicubic))
             using (Bitmap requestMask = ResizeForApi(selectionMask, 2048, InterpolationMode.NearestNeighbor))
+            using (Bitmap requestReference = referenceImage == null ? null : ResizeForApi(referenceImage, 1280, InterpolationMode.HighQualityBicubic))
             {
                 string requestUrl = GeminiRequestUrl(settings);
-                string guardedPrompt = GuardedGeminiPrompt(prompt);
+                string guardedPrompt = BuildGeminiPrompt(prompt, requestReference != null);
                 string sourceData = Convert.ToBase64String(Png(requestSource));
                 string maskData = Convert.ToBase64String(Png(requestMask));
-                Dictionary<string, object> payload = BuildGeminiPayload(settings, guardedPrompt, sourceData, maskData);
+                string referenceData = requestReference == null ? null : Convert.ToBase64String(Png(requestReference));
+                Dictionary<string, object> payload = BuildGeminiPayload(settings, guardedPrompt, sourceData, maskData, referenceData);
 
                 using (HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, requestUrl))
                 {
@@ -181,24 +206,58 @@ namespace PixelPatchStudio
                 endpoint.TrimEnd('/').EndsWith("/models", StringComparison.OrdinalIgnoreCase);
         }
 
+        internal static bool UsesGeminiImageConfig(AppSettings settings)
+        {
+            string protocol = GeminiResolutionProtocol.Normalize(settings == null ? null : settings.GeminiResolutionProtocol);
+            if (protocol == "ImageConfig") return true;
+            if (protocol == "ResponseFormat") return false;
+            Uri baseUri;
+            return settings != null && Uri.TryCreate(settings.GeminiBaseUrl, UriKind.Absolute, out baseUri) &&
+                baseUri.Host.EndsWith("vectorengine.ai", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static string GeminiResolutionWarning(AppSettings settings, int width, int height)
+        {
+            if (settings == null || settings.SelectedProvider != ApiProvider.NanoBanana ||
+                !GeminiResolution.IsClearlyBelowRequested(settings.GeminiImageSize, width, height)) return null;
+            string requested = GeminiResolution.Normalize(settings.GeminiImageSize);
+            string protocol = UsesGeminiGenerateContent(settings)
+                ? (UsesGeminiImageConfig(settings) ? "Image Config" : "Response Format")
+                : "Interactions response_format";
+            return "已请求 Nano Banana " + requested + "，但中转返回的原始图片只有 " + width + " × " + height +
+                "，明显低于原生 " + requested + "。\n\n当前分辨率协议：" + protocol +
+                "\n这通常表示中转没有识别或透传分辨率参数，本次请求仍可能已经计费。" +
+                "\n如果启用了 Real-ESRGAN，后续只会进行本地放大，并不代表 Nano Banana 原生 " + requested + "。";
+        }
+
         internal static Dictionary<string, object> BuildGeminiPayload(AppSettings settings, string guardedPrompt, string sourceData, string maskData)
+        {
+            return BuildGeminiPayload(settings, guardedPrompt, sourceData, maskData, null);
+        }
+
+        internal static Dictionary<string, object> BuildGeminiPayload(AppSettings settings, string guardedPrompt, string sourceData, string maskData, string referenceData)
         {
             Dictionary<string, object> payload = new Dictionary<string, object>();
             string imageSize = GeminiResolution.Normalize(settings == null ? null : settings.GeminiImageSize);
             if (UsesGeminiGenerateContent(settings))
             {
+                List<object> parts = new List<object>
+                {
+                    new Dictionary<string, object> { { "text", guardedPrompt } },
+                    new Dictionary<string, object> { { "inline_data", new Dictionary<string, object> { { "mime_type", "image/png" }, { "data", sourceData } } } },
+                    new Dictionary<string, object> { { "inline_data", new Dictionary<string, object> { { "mime_type", "image/png" }, { "data", maskData } } } }
+                };
+                if (!string.IsNullOrEmpty(referenceData))
+                {
+                    parts.Add(new Dictionary<string, object> { { "text", "STYLE_REFERENCE_ONLY: use only its palette, lighting, texture and materials. Never copy any person, face, body, silhouette, subject, pose, clothing, object layout or composition from it." } });
+                    parts.Add(new Dictionary<string, object> { { "inline_data", new Dictionary<string, object> { { "mime_type", "image/png" }, { "data", referenceData } } } });
+                }
                 payload["contents"] = new object[]
                 {
                     new Dictionary<string, object>
                     {
                         { "role", "user" },
-                        { "parts", new object[]
-                            {
-                                new Dictionary<string, object> { { "text", guardedPrompt } },
-                                new Dictionary<string, object> { { "inline_data", new Dictionary<string, object> { { "mime_type", "image/png" }, { "data", sourceData } } } },
-                                new Dictionary<string, object> { { "inline_data", new Dictionary<string, object> { { "mime_type", "image/png" }, { "data", maskData } } } }
-                            }
-                        }
+                        { "parts", parts.ToArray() }
                     }
                 };
                 Dictionary<string, object> generationConfig = new Dictionary<string, object>
@@ -207,22 +266,35 @@ namespace PixelPatchStudio
                 };
                 if (imageSize != "Auto")
                 {
-                    generationConfig["responseFormat"] = new Dictionary<string, object>
+                    if (UsesGeminiImageConfig(settings))
                     {
-                        { "image", new Dictionary<string, object> { { "imageSize", imageSize } } }
-                    };
+                        generationConfig["imageConfig"] = new Dictionary<string, object> { { "imageSize", imageSize } };
+                    }
+                    else
+                    {
+                        generationConfig["responseFormat"] = new Dictionary<string, object>
+                        {
+                            { "image", new Dictionary<string, object> { { "imageSize", imageSize } } }
+                        };
+                    }
                 }
                 payload["generationConfig"] = generationConfig;
             }
             else
             {
                 payload["model"] = NormalizeGeminiModel(settings == null ? null : settings.Model);
-                payload["input"] = new object[]
+                List<object> input = new List<object>
                 {
                     new Dictionary<string, object> { { "type", "text" }, { "text", guardedPrompt } },
                     new Dictionary<string, object> { { "type", "image" }, { "mime_type", "image/png" }, { "data", sourceData } },
                     new Dictionary<string, object> { { "type", "image" }, { "mime_type", "image/png" }, { "data", maskData } }
                 };
+                if (!string.IsNullOrEmpty(referenceData))
+                {
+                    input.Add(new Dictionary<string, object> { { "type", "text" }, { "text", "STYLE_REFERENCE_ONLY: use only its palette, lighting, texture and materials. Never copy any person, face, body, silhouette, subject, pose, clothing, object layout or composition from it." } });
+                    input.Add(new Dictionary<string, object> { { "type", "image" }, { "mime_type", "image/png" }, { "data", referenceData } });
+                }
+                payload["input"] = input.ToArray();
                 Dictionary<string, object> responseFormat = new Dictionary<string, object> { { "type", "image" } };
                 if (imageSize != "Auto") responseFormat["image_size"] = imageSize;
                 payload["response_format"] = responseFormat;
@@ -278,14 +350,21 @@ namespace PixelPatchStudio
             return new InvalidOperationException("接口请求失败（" + (int)response.StatusCode + " " + response.ReasonPhrase + "）：" + message + address);
         }
 
-        private static string GuardedPrompt(string prompt)
+        internal static string BuildOpenAiPrompt(string prompt, bool hasReference)
         {
-            return (prompt ?? "").Trim() + "\n\nEdit only the transparent area of the supplied mask. Preserve every unmasked pixel, the subject's identity, position, pose, anatomy, camera, crop, perspective and composition exactly. Return a complete image aligned pixel-for-pixel with the input.";
+            string guarded = (prompt ?? "").Trim() + "\n\nEdit only the transparent area of the supplied mask. Preserve every unmasked pixel, the subject's identity, position, pose, anatomy, camera, crop, perspective and composition exactly. Return a complete image aligned pixel-for-pixel with the input.";
+            if (!hasReference) return guarded;
+            return guarded + " The first image is the editable original and the second image is a style reference only. Use the reference only for palette, lighting, texture and materials. Never copy any person, face, body, silhouette, subject, pose, clothing, object placement or composition from the reference. Do not add duplicate people, reflections, translucent figures, double exposures or ghost remnants.";
         }
 
-        private static string GuardedGeminiPrompt(string prompt)
+        internal static string BuildGeminiPrompt(string prompt, bool hasReference)
         {
-            return (prompt ?? "").Trim() + "\n\nThere are two images after this instruction: the original image, then a binary mask. In the mask, white is the ONLY region allowed to change and black must remain untouched. Keep the same canvas size. Preserve the person's identity, exact position, pose, anatomy, clothing outside the white mask, camera, crop, perspective and composition. Return one complete image precisely aligned with the original.";
+            string imageDescription = hasReference
+                ? "There are three images after this instruction: the original image, a binary mask, then a style reference image."
+                : "There are two images after this instruction: the original image, then a binary mask.";
+            string guarded = (prompt ?? "").Trim() + "\n\n" + imageDescription + " In the mask, white is the ONLY region allowed to change and black must remain untouched. Keep the same canvas size. Preserve the person's identity, exact position, pose, anatomy, clothing outside the white mask, camera, crop, perspective and composition. Return one complete image precisely aligned with the original.";
+            if (!hasReference) return guarded;
+            return guarded + " Use the third image only for palette, lighting, texture and materials. Ignore every person, face, body, silhouette, subject, pose, clothing, object placement and composition in it. Do not add duplicate people, reflections, translucent figures, double exposures or ghost remnants.";
         }
 
         private static byte[] Png(Bitmap bitmap)
@@ -422,24 +501,26 @@ namespace PixelPatchStudio
 
         internal static string FindImageData(object node)
         {
+            string last = null;
             IDictionary<string, object> dictionary = node as IDictionary<string, object>;
             if (dictionary != null)
             {
                 object mime;
                 object data;
                 bool image = (dictionary.TryGetValue("mime_type", out mime) || dictionary.TryGetValue("mimeType", out mime)) && Convert.ToString(mime).StartsWith("image/", StringComparison.OrdinalIgnoreCase);
-                if (image && dictionary.TryGetValue("data", out data) && data is string) return (string)data;
+                if (image && dictionary.TryGetValue("data", out data) && data is string) last = (string)data;
                 object output;
                 if (dictionary.TryGetValue("output_image", out output))
                 {
                     IDictionary<string, object> imageObject = output as IDictionary<string, object>;
-                    if (imageObject != null && imageObject.TryGetValue("data", out data) && data is string) return (string)data;
+                    if (imageObject != null && imageObject.TryGetValue("data", out data) && data is string) last = (string)data;
                 }
                 foreach (object child in dictionary.Values)
                 {
                     string found = FindImageData(child);
-                    if (!string.IsNullOrEmpty(found)) return found;
+                    if (!string.IsNullOrEmpty(found)) last = found;
                 }
+                return last;
             }
             IEnumerable list = node as IEnumerable;
             if (list != null && !(node is string))
@@ -447,10 +528,10 @@ namespace PixelPatchStudio
                 foreach (object child in list)
                 {
                     string found = FindImageData(child);
-                    if (!string.IsNullOrEmpty(found)) return found;
+                    if (!string.IsNullOrEmpty(found)) last = found;
                 }
             }
-            return null;
+            return last;
         }
 
         private static string FindErrorMessage(string body)

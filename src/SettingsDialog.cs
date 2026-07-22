@@ -15,6 +15,7 @@ namespace PixelPatchStudio
         private TextBox endpoint;
         private TextBox model;
         private ComboBox geminiImageSize;
+        private ComboBox geminiResolutionProtocol;
         private TextBox apiKey;
         private Label keyState;
         private TextBox esrganPath;
@@ -87,7 +88,17 @@ namespace PixelPatchStudio
             geminiImageSize = Combo();
             geminiImageSize.Items.AddRange(GeminiResolution.DisplayNames);
             geminiImageSize.SelectedIndex = GeminiResolution.IndexOf(settings.GeminiImageSize);
-            AddRow(apiTable, 5, "生成分辨率", geminiImageSize);
+            geminiResolutionProtocol = Combo();
+            geminiResolutionProtocol.Items.AddRange(GeminiResolutionProtocol.DisplayNames);
+            geminiResolutionProtocol.SelectedIndex = GeminiResolutionProtocol.IndexOf(settings.GeminiResolutionProtocol);
+            TableLayoutPanel resolutionOptions = new TableLayoutPanel { Dock = DockStyle.Fill, Height = 32, ColumnCount = 2, RowCount = 1, Margin = new Padding(0), BackColor = UiTheme.Card };
+            resolutionOptions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 36));
+            resolutionOptions.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 64));
+            geminiImageSize.Margin = new Padding(0, 0, 4, 0);
+            geminiResolutionProtocol.Margin = new Padding(4, 0, 0, 0);
+            resolutionOptions.Controls.Add(geminiImageSize, 0, 0);
+            resolutionOptions.Controls.Add(geminiResolutionProtocol, 1, 0);
+            AddRow(apiTable, 5, "分辨率/协议", resolutionOptions);
 
             Panel keyPanel = new Panel { Dock = DockStyle.Fill, Height = 64 };
             apiKey = Field(); apiKey.UseSystemPasswordChar = true; apiKey.Dock = DockStyle.Top;
@@ -102,7 +113,7 @@ namespace PixelPatchStudio
                 MaximumSize = new Size(270, 0),
                 ForeColor = UiTheme.Subtle,
                 Font = new Font("Microsoft YaHei UI", 8f),
-                Text = "Key 使用当前用户 DPAPI 加密并跨版本沿用。Nano Banana 中转可使用 {model} 占位符；4K 需要 Gemini 3 图像模型及中转支持。"
+                Text = "Key 使用当前用户 DPAPI 加密并跨版本沿用。分辨率协议自动模式会为 VectorEngine 使用 Image Config；返回尺寸不足时会提示。"
             };
             apiTable.Controls.Add(note, 1, 7);
             Panel openSourcePanel = new Panel
@@ -212,6 +223,7 @@ namespace PixelPatchStudio
             apiKey.Text = "";
             keyState.Text = string.IsNullOrEmpty(store.GetApiKey(editingProvider)) ? "尚未保存 Key" : "✓ 已为此服务保存 Key";
             geminiImageSize.Enabled = editingProvider == ApiProvider.NanoBanana;
+            geminiResolutionProtocol.Enabled = editingProvider == ApiProvider.NanoBanana;
         }
 
         private void CommitProviderFields()
@@ -246,6 +258,7 @@ namespace PixelPatchStudio
             settings.RealEsrganModel = esrganModel.Text.Trim();
             settings.RealEsrganScale = (int)esrganScale.Value;
             settings.GeminiImageSize = GeminiResolution.Values[Math.Max(0, geminiImageSize.SelectedIndex)];
+            settings.GeminiResolutionProtocol = GeminiResolutionProtocol.Values[Math.Max(0, geminiResolutionProtocol.SelectedIndex)];
             settings.UiScalePercent = UiScale.PercentValues[Math.Max(0, uiScale.SelectedIndex)];
             store.Save(settings);
             DialogResult = DialogResult.OK;

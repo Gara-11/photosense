@@ -5,6 +5,7 @@ using System.Drawing;
 using System.IO;
 using System.IO.Compression;
 using System.Net;
+using System.Net.Http;
 using System.Security.Principal;
 using System.Windows.Forms;
 
@@ -90,6 +91,17 @@ namespace PixelPatchStudio
                         if (args.Length > 2 && int.TryParse(args[2], out page)) form.DebugShowToolPage(page);
                         if (args.Length > 6 && string.Equals(args[6], "esrgan-checked", StringComparison.OrdinalIgnoreCase))
                             form.DebugSetRealEsrganChecked(true);
+                        if (args.Length > 6 && string.Equals(args[6], "reference-loaded", StringComparison.OrdinalIgnoreCase))
+                        {
+                            using (Bitmap reference = new Bitmap(320, 180))
+                            using (Graphics referenceGraphics = Graphics.FromImage(reference))
+                            {
+                                referenceGraphics.Clear(Color.FromArgb(224, 116, 164));
+                                referenceGraphics.FillEllipse(Brushes.PeachPuff, 44, 22, 104, 136);
+                                referenceGraphics.FillRectangle(Brushes.MediumPurple, 164, 30, 118, 112);
+                                form.DebugSetReferenceImage(reference, "reference-preview.jpg");
+                            }
+                        }
                         Application.DoEvents();
                         using (Bitmap screenshot = new Bitmap(form.Width, form.Height))
                         {
@@ -354,8 +366,8 @@ namespace PixelPatchStudio
                         Assert(apiMask.GetPixel(0, 0).A == 255, "OpenAI 蒙版外必须不透明");
                         Assert(apiMask.GetPixel(3, 3).A == 0, "OpenAI 重绘区必须透明");
                     }
-                    using (Bitmap renderedMask = new Bitmap(2, 1))
-                    {
+                using (Bitmap renderedMask = new Bitmap(2, 1))
+                {
                         renderedMask.SetPixel(0, 0, Color.Black);
                         renderedMask.SetPixel(1, 0, Color.White);
                         using (Bitmap renderedOverlay = ImageCanvas.BuildOverlay(renderedMask))
@@ -367,6 +379,24 @@ namespace PixelPatchStudio
                     }
                 }
 
+                using (Bitmap reference = new Bitmap(80, 80))
+                {
+                    using (Graphics referenceGraphics = Graphics.FromImage(reference))
+                    {
+                        for (int row = 0; row < 8; row++)
+                            for (int column = 0; column < 8; column++)
+                                using (Brush cell = new SolidBrush(Color.FromArgb((column * 31 + row * 7) % 256, (row * 29 + column * 5) % 256, (column * 13 + row * 17) % 256)))
+                                    referenceGraphics.FillRectangle(cell, column * 10, row * 10, 10, 10);
+                    }
+                    using (Bitmap safeReference = ImageComposer.PrepareStyleReference(reference, 1280))
+                    {
+                        Assert(safeReference.Width == 80 && safeReference.Height == 80 &&
+                            safeReference.GetPixel(5, 5).ToArgb() == reference.GetPixel(35, 15).ToArgb() &&
+                            safeReference.GetPixel(5, 5).ToArgb() != reference.GetPixel(5, 5).ToArgb(),
+                            "参考图防残影拼贴没有打散原始人物/构图位置");
+                    }
+                }
+
                 Assert(ApiUrl.Combine("https://api.openai.com/", "/v1/images/edits") == "https://api.openai.com/v1/images/edits", "URL 拼接失败");
                 Assert(ApiUrl.Combine("https://api.intenext.ai/v1", "/v1/images/edits") == "https://api.intenext.ai/v1/images/edits", "中转 URL 重复路径未去除");
                 Assert(UiScale.NormalizePercent(125) == 125 && UiScale.NormalizePercent(113) == 0 &&
@@ -375,6 +405,9 @@ namespace PixelPatchStudio
                 Assert(GeminiResolution.Normalize("4k") == "4K" && GeminiResolution.Normalize("unsupported") == "Auto" &&
                     GeminiResolution.Values[GeminiResolution.IndexOf("2K")] == "2K",
                     "Nano Banana 分辨率选项归一化失败");
+                Assert(GeminiResolutionProtocol.Normalize("image config") == "ImageConfig" &&
+                    GeminiResolutionProtocol.Values[GeminiResolutionProtocol.IndexOf("response format")] == "ResponseFormat",
+                    "Nano Banana 分辨率协议归一化失败");
                 using (ModernCheckBox checkBox = new ModernCheckBox())
                 {
                     bool changed = false;
@@ -397,10 +430,48 @@ namespace PixelPatchStudio
                 Assert(serializedRelay.IndexOf("\"contents\"", StringComparison.Ordinal) >= 0 &&
                     serializedRelay.IndexOf("\"inline_data\"", StringComparison.Ordinal) >= 0 &&
                     serializedRelay.IndexOf("\"responseModalities\"", StringComparison.Ordinal) >= 0 &&
-                    serializedRelay.IndexOf("\"responseFormat\"", StringComparison.Ordinal) >= 0 &&
+                    serializedRelay.IndexOf("\"imageConfig\"", StringComparison.Ordinal) >= 0 &&
                     serializedRelay.IndexOf("\"imageSize\":\"4K\"", StringComparison.Ordinal) >= 0 &&
+                    serializedRelay.IndexOf("\"responseFormat\"", StringComparison.Ordinal) < 0 &&
+                    serializedRelay.IndexOf("STYLE_REFERENCE_ONLY", StringComparison.Ordinal) < 0 &&
                     serializedRelay.IndexOf("\"input\"", StringComparison.Ordinal) < 0,
-                    "Nano Banana generateContent 请求体格式错误");
+                    "VectorEngine 自动兼容请求体格式错误");
+                string referencePrompt = ImageApiClient.BuildGeminiPrompt("user prompt remains", true);
+                string serializedRelayReference = testJson.Serialize(ImageApiClient.BuildGeminiPayload(relaySettings, referencePrompt, "source64", "mask64", "reference64"));
+                Assert(referencePrompt.StartsWith("user prompt remains", StringComparison.Ordinal) &&
+                    referencePrompt.IndexOf("ghost remnants", StringComparison.Ordinal) >= 0 &&
+                    serializedRelayReference.IndexOf("STYLE_REFERENCE_ONLY", StringComparison.Ordinal) >= 0 &&
+                    serializedRelayReference.IndexOf("reference64", StringComparison.Ordinal) >= 0,
+                    "Nano Banana 参考图请求没有独立标记或防残影约束");
+                string openAiWithoutReference = ImageApiClient.BuildOpenAiPrompt("unchanged prompt", false);
+                string openAiWithReference = ImageApiClient.BuildOpenAiPrompt("unchanged prompt", true);
+                Assert(openAiWithoutReference.StartsWith("unchanged prompt", StringComparison.Ordinal) &&
+                    openAiWithoutReference.IndexOf("style reference", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    openAiWithReference.StartsWith("unchanged prompt", StringComparison.Ordinal) &&
+                    openAiWithReference.IndexOf("ghost remnants", StringComparison.Ordinal) >= 0,
+                    "GPT Image 2 参考图分支影响了原有提示词保护逻辑");
+                using (MultipartFormDataContent openAiReferenceForm = ImageApiClient.BuildOpenAiForm(
+                    new AppSettings(), "prompt", new byte[] { 1 }, new byte[] { 2 }, new byte[] { 3 }))
+                {
+                    Assert(CountMultipartParts(openAiReferenceForm, "image[]", null) == 2 &&
+                        CountMultipartParts(openAiReferenceForm, "image[]", "source.png") == 1 &&
+                        CountMultipartParts(openAiReferenceForm, "image[]", "style-reference.png") == 1 &&
+                        CountMultipartParts(openAiReferenceForm, "mask", "mask.png") == 1,
+                        "GPT Image 2 reference image was not uploaded as the second image[] part");
+                }
+                using (MultipartFormDataContent openAiPlainForm = ImageApiClient.BuildOpenAiForm(
+                    new AppSettings(), "prompt", new byte[] { 1 }, new byte[] { 2 }, null))
+                {
+                    Assert(CountMultipartParts(openAiPlainForm, "image[]", null) == 1 &&
+                        CountMultipartParts(openAiPlainForm, "image[]", "style-reference.png") == 0,
+                        "GPT Image 2 request changed when no reference image was selected");
+                }
+                relaySettings.GeminiResolutionProtocol = "ResponseFormat";
+                string serializedResponseFormat = testJson.Serialize(ImageApiClient.BuildGeminiPayload(relaySettings, "prompt", "source64", "mask64"));
+                Assert(serializedResponseFormat.IndexOf("\"responseFormat\"", StringComparison.Ordinal) >= 0 &&
+                    serializedResponseFormat.IndexOf("\"imageSize\":\"4K\"", StringComparison.Ordinal) >= 0 &&
+                    serializedResponseFormat.IndexOf("\"imageConfig\"", StringComparison.Ordinal) < 0,
+                    "Nano Banana Response Format 请求体格式错误");
                 AppSettings interactionsSettings = new AppSettings
                 {
                     GeminiBaseUrl = "https://generativelanguage.googleapis.com",
@@ -416,6 +487,13 @@ namespace PixelPatchStudio
                     "Nano Banana Interactions 请求体格式错误");
                 object sampleGeminiResponse = testJson.DeserializeObject("{\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"aW1hZ2U=\"}}]}}]}");
                 Assert(ImageApiClient.FindImageData(sampleGeminiResponse) == "aW1hZ2U=", "generateContent 图片响应解析失败");
+                object thinkingGeminiResponse = testJson.DeserializeObject("{\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"dGhvdWdodA==\"}},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"ZmluYWw=\"}}]}}]}");
+                Assert(ImageApiClient.FindImageData(thinkingGeminiResponse) == "ZmluYWw=", "没有优先使用 Gemini 最后一张最终图片");
+                relaySettings.Provider = "Nano Banana";
+                relaySettings.GeminiResolutionProtocol = "Auto";
+                Assert(!string.IsNullOrEmpty(ImageApiClient.GeminiResolutionWarning(relaySettings, 842, 1264)) &&
+                    string.IsNullOrEmpty(ImageApiClient.GeminiResolutionWarning(relaySettings, 3392, 5056)),
+                    "Nano Banana 分辨率不足检测失败");
                 using (Bitmap large = new Bitmap(300, 450))
                 using (Bitmap resized = ImageApiClient.ResizeForApi(large, 200, System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic))
                 {
@@ -460,6 +538,7 @@ namespace PixelPatchStudio
                 saved.GeminiEndpoint = "/v1beta/models";
                 saved.GeminiModel = "test-image-model:generateContent";
                 saved.GeminiImageSize = "4k";
+                saved.GeminiResolutionProtocol = "image config";
                 saved.UiScalePercent = 125;
                 store.Save(saved);
                 store.SetApiKey(ApiProvider.NanoBanana, "self-test-secret");
@@ -469,6 +548,7 @@ namespace PixelPatchStudio
                     "Nano Banana 中转旧配置迁移失败");
                 Assert(loaded.UiScalePercent == 125, "UI Scale 设置持久化失败");
                 Assert(loaded.GeminiImageSize == "4K", "Nano Banana 分辨率设置持久化失败");
+                Assert(loaded.GeminiResolutionProtocol == "ImageConfig", "Nano Banana 分辨率协议持久化失败");
                 Assert(store.GetApiKey(ApiProvider.NanoBanana) == "self-test-secret", "DPAPI Key 持久化失败");
 
                 string placeScript = PhotoshopBridge.BuildPlacePatchScript("C:\\tmp\\patch.png", "PixelPatch", 123);
@@ -502,6 +582,20 @@ namespace PixelPatchStudio
             {
                 try { Directory.Delete(root, true); } catch { }
             }
+        }
+
+        private static int CountMultipartParts(MultipartFormDataContent form, string name, string fileName)
+        {
+            int count = 0;
+            foreach (HttpContent part in form)
+            {
+                if (part.Headers.ContentDisposition == null) continue;
+                string partName = (part.Headers.ContentDisposition.Name ?? string.Empty).Trim('"');
+                string partFileName = (part.Headers.ContentDisposition.FileName ?? string.Empty).Trim('"');
+                if (string.Equals(partName, name, StringComparison.Ordinal) &&
+                    (fileName == null || string.Equals(partFileName, fileName, StringComparison.Ordinal))) count++;
+            }
+            return count;
         }
 
         private static void Assert(bool condition, string message)

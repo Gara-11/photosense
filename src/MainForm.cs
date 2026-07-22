@@ -20,6 +20,8 @@ namespace PixelPatchStudio
         private PhotoshopImage photoshopSource;
         private Bitmap generated;
         private Bitmap composite;
+        private Bitmap referenceImage;
+        private string referenceImageName;
         private CancellationTokenSource cancellation;
 
         private ImageCanvas canvas;
@@ -28,6 +30,10 @@ namespace PixelPatchStudio
         private NavIconButton[] navButtons;
         private ComboBox provider;
         private TextBox prompt;
+        private PictureBox referencePreview;
+        private Label referenceState;
+        private Button selectReferenceButton;
+        private Button clearReferenceButton;
         private ModernTrackBar brush;
         private Label brushValue;
         private Label status;
@@ -62,7 +68,7 @@ namespace PixelPatchStudio
 
         private void BuildUi()
         {
-            Text = "PhotoSense 1.0.15 · Photoshop AI 局部重绘";
+            Text = "PhotoSense 1.0.16 · Photoshop AI 局部重绘";
             Icon = AppIcon.Create();
             StartPosition = FormStartPosition.CenterScreen;
             ClientSize = new Size(1440, 900);
@@ -79,7 +85,7 @@ namespace PixelPatchStudio
             Panel top = new Panel { Dock = DockStyle.Top, Height = 48, BackColor = UiTheme.Header };
             Label brand = new Label { Text = "PHOTOSENSE", Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold), ForeColor = UiTheme.Text, AutoSize = true, Location = new Point(18, 12), BackColor = Color.Transparent };
             Label subtitle = new Label { Text = "Get Good Get PhotoSense.", Font = new Font("Segoe UI", 7.5f, FontStyle.Regular), ForeColor = UiTheme.Subtle, AutoSize = true, Location = new Point(142, 17), BackColor = Color.Transparent };
-            RoundedLabel version = new RoundedLabel { Text = "V1.0.15", Size = new Size(68, 22), Location = new Point(390, 13), FillColor = Color.FromArgb(28, 33, 27), TextColor = UiTheme.AccentBright, Radius = 5f };
+            RoundedLabel version = new RoundedLabel { Text = "V1.0.16", Size = new Size(68, 22), Location = new Point(390, 13), FillColor = Color.FromArgb(28, 33, 27), TextColor = UiTheme.AccentBright, Radius = 5f };
             Label keyHint = new Label { Text = "B  画笔    E  橡皮    [ ]  笔刷    空格  平移", Dock = DockStyle.Right, Width = 340, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(0, 0, 18, 0), ForeColor = UiTheme.Subtle, Font = new Font("Microsoft YaHei UI", 8f), BackColor = Color.Transparent };
             top.Controls.Add(keyHint); top.Controls.Add(version); top.Controls.Add(subtitle); top.Controls.Add(brand);
             Controls.Add(top);
@@ -210,7 +216,7 @@ namespace PixelPatchStudio
             prompt = new TextBox
             {
                 Location = new Point(16, 120),
-                Size = new Size(292, 112),
+                Size = new Size(292, 96),
                 Multiline = true,
                 ScrollBars = ScrollBars.Vertical,
                 BackColor = UiTheme.Field,
@@ -219,21 +225,43 @@ namespace PixelPatchStudio
                 Font = new Font("Microsoft YaHei UI", 9.5f),
                 Text = "重绘选中区域，保持原图的光线、透视和质感自然一致"
             };
-            Label providerLabel = SectionCaption("生成服务"); providerLabel.Location = new Point(16, 252);
-            provider = new ComboBox { Location = new Point(16, 278), Size = new Size(292, 34), DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = UiTheme.Field, ForeColor = UiTheme.Text };
+
+            Label referenceLabel = SectionCaption("参考图（可选）"); referenceLabel.Location = new Point(16, 226);
+            referencePreview = new PictureBox
+            {
+                Location = new Point(16, 252),
+                Size = new Size(56, 56),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = UiTheme.Field,
+                BorderStyle = BorderStyle.FixedSingle
+            };
+            selectReferenceButton = ButtonOf("选择参考图", false); selectReferenceButton.SetBounds(82, 252, 146, 32); selectReferenceButton.Click += SelectReferenceImage;
+            clearReferenceButton = ButtonOf("清除", false); clearReferenceButton.SetBounds(236, 252, 72, 32); clearReferenceButton.Enabled = false; clearReferenceButton.Click += ClearReferenceImageClicked;
+            referenceState = new Label
+            {
+                Text = "未使用参考图；现有请求保持不变",
+                Location = new Point(82, 289),
+                Size = new Size(226, 34),
+                ForeColor = UiTheme.Subtle,
+                Font = new Font("Microsoft YaHei UI", 8f),
+                AutoEllipsis = true
+            };
+
+            Label providerLabel = SectionCaption("生成服务"); providerLabel.Location = new Point(16, 332);
+            provider = new ComboBox { Location = new Point(16, 358), Size = new Size(292, 34), DropDownStyle = ComboBoxStyle.DropDownList, FlatStyle = FlatStyle.Flat, BackColor = UiTheme.Field, ForeColor = UiTheme.Text };
             provider.Items.AddRange(new object[] { "GPT Image 2", "Nano Banana" });
             StyleComboBox(provider);
             provider.SelectedIndexChanged += ProviderChanged;
 
-            useEsrgan = new ModernCheckBox { Text = "生成后使用 Real-ESRGAN 超分", Location = new Point(16, 328), Size = new Size(292, 28) };
-            installEsrganButton = ButtonOf("自动部署 Real-ESRGAN", false); installEsrganButton.SetBounds(16, 362, 292, 36); installEsrganButton.Click += InstallRealEsrgan;
-            esrganState = new Label { Location = new Point(16, 404), Size = new Size(292, 42), ForeColor = UiTheme.Subtle, Font = new Font("Microsoft YaHei UI", 8f), AutoEllipsis = true };
+            useEsrgan = new ModernCheckBox { Text = "生成后使用 Real-ESRGAN 超分", Location = new Point(16, 406), Size = new Size(292, 28) };
+            installEsrganButton = ButtonOf("自动部署 Real-ESRGAN", false); installEsrganButton.SetBounds(16, 440, 292, 36); installEsrganButton.Click += InstallRealEsrgan;
+            esrganState = new Label { Location = new Point(16, 482), Size = new Size(292, 42), ForeColor = UiTheme.Subtle, Font = new Font("Microsoft YaHei UI", 8f), AutoEllipsis = true };
 
-            generateButton = ButtonOf("开始 AI 局部重绘", true); generateButton.SetBounds(16, 466, 292, 44); generateButton.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold); generateButton.Click += Generate;
-            progress = new AccentProgressBar { Location = new Point(16, 518), Width = 292, Visible = false };
-            cancelButton = ButtonOf("取消当前任务", false); cancelButton.SetBounds(16, 536, 292, 36); cancelButton.Visible = false; cancelButton.Click += delegate { if (cancellation != null) cancellation.Cancel(); };
+            generateButton = ButtonOf("开始 AI 局部重绘", true); generateButton.SetBounds(16, 536, 292, 44); generateButton.Font = new Font("Microsoft YaHei UI", 10f, FontStyle.Bold); generateButton.Click += Generate;
+            progress = new AccentProgressBar { Location = new Point(16, 588), Width = 292, Visible = false };
+            cancelButton = ButtonOf("取消当前任务", false); cancelButton.SetBounds(16, 606, 292, 36); cancelButton.Visible = false; cancelButton.Click += delegate { if (cancellation != null) cancellation.Cancel(); };
 
-            page.Controls.Add(cancelButton); page.Controls.Add(progress); page.Controls.Add(generateButton); page.Controls.Add(esrganState); page.Controls.Add(installEsrganButton); page.Controls.Add(useEsrgan); page.Controls.Add(provider); page.Controls.Add(providerLabel); page.Controls.Add(prompt); page.Controls.Add(promptLabel);
+            page.Controls.Add(cancelButton); page.Controls.Add(progress); page.Controls.Add(generateButton); page.Controls.Add(esrganState); page.Controls.Add(installEsrganButton); page.Controls.Add(useEsrgan); page.Controls.Add(provider); page.Controls.Add(providerLabel); page.Controls.Add(referenceState); page.Controls.Add(clearReferenceButton); page.Controls.Add(selectReferenceButton); page.Controls.Add(referencePreview); page.Controls.Add(referenceLabel); page.Controls.Add(prompt); page.Controls.Add(promptLabel);
             return page;
         }
 
@@ -339,6 +367,67 @@ namespace PixelPatchStudio
             }
         }
 
+        private void SelectReferenceImage(object sender, EventArgs e)
+        {
+            using (OpenFileDialog dialog = new OpenFileDialog())
+            {
+                dialog.Title = "选择风格参考图";
+                dialog.Filter = "图片文件|*.png;*.jpg;*.jpeg;*.bmp;*.tif;*.tiff|所有文件|*.*";
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    Bitmap prepared;
+                    using (Image image = Image.FromFile(dialog.FileName))
+                    using (Bitmap loaded = new Bitmap(image))
+                    {
+                        prepared = ImageComposer.PrepareStyleReference(loaded, 1280);
+                    }
+                    ApplyPreparedReference(prepared, Path.GetFileName(dialog.FileName), true);
+                }
+                catch (Exception ex)
+                {
+                    ShowError(new InvalidOperationException("无法读取参考图。请使用有效的 PNG、JPG、BMP 或 TIFF 图片。\n\n" + ex.Message, ex));
+                }
+            }
+        }
+
+        private void ApplyPreparedReference(Bitmap prepared, string displayName, bool notify)
+        {
+            if (prepared == null) throw new ArgumentNullException("prepared");
+            ReleaseReferenceImage(false);
+            referenceImage = prepared;
+            referenceImageName = string.IsNullOrWhiteSpace(displayName) ? "参考图" : displayName;
+            referencePreview.Image = referenceImage;
+            referenceState.Text = referenceImageName + " · " + referenceImage.Width + " × " + referenceImage.Height;
+            clearReferenceButton.Enabled = true;
+            ClearGeneratedResult();
+            if (notify) status.Text = "参考图已载入；不会改写效果描述，人物和主体不会从参考图复制";
+        }
+
+        internal void DebugSetReferenceImage(Bitmap image, string displayName)
+        {
+            ApplyPreparedReference(ImageComposer.PrepareStyleReference(image, 1280), displayName, false);
+        }
+
+        private void ClearReferenceImageClicked(object sender, EventArgs e)
+        {
+            ReleaseReferenceImage(true);
+        }
+
+        private void ReleaseReferenceImage(bool notify)
+        {
+            if (referencePreview != null) referencePreview.Image = null;
+            if (referenceImage != null) { referenceImage.Dispose(); referenceImage = null; }
+            referenceImageName = null;
+            if (referenceState != null) referenceState.Text = "未使用参考图；现有请求保持不变";
+            if (clearReferenceButton != null) clearReferenceButton.Enabled = false;
+            if (notify)
+            {
+                ClearGeneratedResult();
+                status.Text = "参考图已清除；已恢复原有请求方式";
+            }
+        }
+
         private void LoadBitmap(Bitmap bitmap, PhotoshopImage info)
         {
             using (bitmap)
@@ -432,7 +521,13 @@ namespace PixelPatchStudio
                 using (ImageApiClient client = new ImageApiClient(settings.ApiTimeoutSeconds))
                 {
                     status.Text = "正在优化接口图片并调用 " + ProviderDescription() + "…";
-                    Bitmap apiResult = await client.GenerateAsync(source, mask, prompt.Text, settings, key, cancellation.Token);
+                    Bitmap apiResult = await client.GenerateAsync(source, mask, referenceImage, prompt.Text, settings, key, cancellation.Token);
+                    string resolutionWarning = ImageApiClient.GeminiResolutionWarning(settings, apiResult.Width, apiResult.Height);
+                    if (!string.IsNullOrEmpty(resolutionWarning))
+                    {
+                        status.Text = "中转返回的图片低于所选 Nano Banana 分辨率";
+                        MessageBox.Show(this, resolutionWarning, "Nano Banana 分辨率未生效", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
                     if (useEsrgan.Checked)
                     {
                         status.Text = "正在使用 Real-ESRGAN 超分辨率…";
@@ -691,6 +786,8 @@ namespace PixelPatchStudio
         {
             generateButton.Enabled = !busy;
             if (installEsrganButton != null) installEsrganButton.Enabled = !busy;
+            if (selectReferenceButton != null) selectReferenceButton.Enabled = !busy;
+            if (clearReferenceButton != null) clearReferenceButton.Enabled = !busy && referenceImage != null;
             progress.Visible = busy;
             cancelButton.Visible = busy;
             provider.Enabled = !busy;
@@ -711,11 +808,11 @@ namespace PixelPatchStudio
                 string logDirectory = Path.Combine(store.DataDirectory, "Logs");
                 Directory.CreateDirectory(logDirectory);
                 logPath = Path.Combine(logDirectory, "errors.log");
-                File.AppendAllText(logPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " · PhotoSense 1.0.15\r\n" + ex + "\r\n\r\n");
+                File.AppendAllText(logPath, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " · PhotoSense 1.0.16\r\n" + ex + "\r\n\r\n");
             }
             catch { }
             string details = ex.Message + (IsPhotoshopStorageError(ex) ? LowDiskWarning() : "") + (string.IsNullOrEmpty(logPath) ? "" : "\n\n诊断记录：" + logPath);
-            MessageBox.Show(this, details, "PhotoSense 1.0.15", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(this, details, "PhotoSense 1.0.16", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
 
         private static bool IsPhotoshopStorageError(Exception ex)
@@ -762,6 +859,7 @@ namespace PixelPatchStudio
             try { store.Save(settings); } catch { }
             if (cancellation != null) cancellation.Cancel();
             ClearGeneratedResult();
+            ReleaseReferenceImage(false);
             photoshop.Dispose();
         }
 
