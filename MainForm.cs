@@ -135,11 +135,39 @@ namespace PixelPatchStudio
             BrandGradientLine accentLine = new BrandGradientLine { Dock = DockStyle.Top };
             Controls.Add(accentLine);
             Panel top = new Panel { Dock = DockStyle.Top, Height = 48, BackColor = UiTheme.Header };
-            Label brand = new Label { Text = "PHOTOSENSE", Font = new Font("Microsoft YaHei UI", 12f, FontStyle.Bold), ForeColor = UiTheme.Text, AutoSize = true, Location = new Point(18, 12), BackColor = Color.Transparent };
-            Label subtitle = new Label { Text = "Get Good Get PhotoSense.", Font = new Font("Segoe UI", 7.5f, FontStyle.Regular), ForeColor = UiTheme.Subtle, AutoSize = true, Location = new Point(142, 17), BackColor = Color.Transparent };
-            RoundedLabel version = new RoundedLabel { Text = "V1.0.17", Size = new Size(68, 22), Location = new Point(390, 13), FillColor = Color.FromArgb(28, 33, 27), TextColor = UiTheme.AccentBright, Radius = 5f };
+            
+            Label brand = new Label 
+            { 
+                Text = "PHOTOSENSE",
+                Font = new Font("Segoe UI", 13f, FontStyle.Bold),
+                AutoSize = true,
+                Location = new Point(18, 14),
+                BackColor = Color.Transparent
+            };
+            brand.Paint += (s, e) =>
+            {
+                e.Graphics.Clear(UiTheme.Header);
+                using (SolidBrush grayBrush = new SolidBrush(Color.FromArgb(160, 160, 165)))
+                using (SolidBrush blueBrush = new SolidBrush(Color.FromArgb(52, 152, 219)))
+                {
+                    e.Graphics.DrawString("PHOTO", brand.Font, grayBrush, 0, 0);
+                    SizeF photoSize = e.Graphics.MeasureString("PHOTO", brand.Font);
+                    e.Graphics.DrawString("SENSE", brand.Font, blueBrush, photoSize.Width - 8, 0);
+                }
+            };
+            top.Controls.Add(brand);
+            
+            Label subtitle = new Label { Text = "Get Good Get PhotoSense.", Font = new Font("Segoe UI", 7.5f, FontStyle.Regular), ForeColor = UiTheme.Subtle, AutoSize = true, BackColor = Color.Transparent };
+            top.Controls.Add(subtitle);
+            
+            using (Graphics g = CreateGraphics())
+            {
+                SizeF brandSize = g.MeasureString("PHOTOSENSE", brand.Font);
+                subtitle.Location = new Point(18 + (int)brandSize.Width + 8, 22);
+            }
+            RoundedLabel version = new RoundedLabel { Text = "V1.0.18", Size = new Size(68, 22), Location = new Point(390, 13), FillColor = Color.FromArgb(28, 33, 27), TextColor = UiTheme.AccentBright, Radius = 5f };
             Label keyHint = new Label { Text = "B  画笔    E  橡皮    [ ]  笔刷    空格  平移", Dock = DockStyle.Right, Width = 340, TextAlign = ContentAlignment.MiddleRight, Padding = new Padding(0, 0, 18, 0), ForeColor = UiTheme.Subtle, Font = new Font("Microsoft YaHei UI", 8f), BackColor = Color.Transparent };
-            top.Controls.Add(keyHint); top.Controls.Add(version); top.Controls.Add(subtitle); top.Controls.Add(brand);
+            top.Controls.Add(keyHint); top.Controls.Add(version);
             Controls.Add(top);
 
             Panel bottom = new Panel { Dock = DockStyle.Bottom, Height = 38, BackColor = UiTheme.Header, Padding = new Padding(14, 7, 12, 7) };
