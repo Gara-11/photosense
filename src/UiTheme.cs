@@ -116,6 +116,61 @@ namespace PixelPatchStudio
         }
     }
 
+    internal sealed class ResultThumbnailControl : Control
+    {
+        private bool hovered;
+        public Image Thumbnail;
+        public bool SelectedState;
+        public bool Favorite;
+        public string Caption = "";
+
+        public ResultThumbnailControl()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            Size = new Size(82, 88);
+            Margin = new Padding(0, 0, 6, 0);
+            Cursor = Cursors.Hand;
+            TabStop = true;
+            Font = new Font("Microsoft YaHei UI", 8f, FontStyle.Bold);
+        }
+
+        protected override void OnMouseEnter(EventArgs e) { hovered = true; Invalidate(); base.OnMouseEnter(e); }
+        protected override void OnMouseLeave(EventArgs e) { hovered = false; Invalidate(); base.OnMouseLeave(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            RectangleF outer = new RectangleF(0.5f, 0.5f, Width - 1f, Height - 1f);
+            Color fillColor = SelectedState ? Color.FromArgb(38, 48, 28) : hovered ? UiTheme.FieldHover : UiTheme.Card;
+            Color borderColor = SelectedState ? UiTheme.AccentBright : hovered ? UiTheme.Muted : UiTheme.CardBorder;
+            using (GraphicsPath path = UiTheme.RoundedRectangle(outer, 7f))
+            using (Brush fill = new SolidBrush(fillColor))
+            using (Pen border = new Pen(borderColor, SelectedState ? 2f : 1f))
+            {
+                e.Graphics.FillPath(fill, path);
+                e.Graphics.DrawPath(border, path);
+            }
+            Rectangle imageArea = new Rectangle(5, 5, Math.Max(1, Width - 10), Math.Max(1, Height - 27));
+            if (Thumbnail != null)
+            {
+                float scale = Math.Min(imageArea.Width / (float)Thumbnail.Width, imageArea.Height / (float)Thumbnail.Height);
+                int width = Math.Max(1, (int)Math.Round(Thumbnail.Width * scale));
+                int height = Math.Max(1, (int)Math.Round(Thumbnail.Height * scale));
+                Rectangle target = new Rectangle(imageArea.X + (imageArea.Width - width) / 2, imageArea.Y + (imageArea.Height - height) / 2, width, height);
+                e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                e.Graphics.DrawImage(Thumbnail, target);
+            }
+            if (Favorite)
+            {
+                using (Font starFont = new Font("Segoe UI Symbol", 10f, FontStyle.Bold))
+                    TextRenderer.DrawText(e.Graphics, "★", starFont, new Rectangle(Width - 22, 4, 18, 18), UiTheme.AccentBright, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            }
+            TextRenderer.DrawText(e.Graphics, Caption, Font, new Rectangle(4, Height - 22, Width - 8, 18), SelectedState ? UiTheme.AccentBright : UiTheme.Text,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPadding);
+        }
+    }
+
     internal sealed class ModernCheckBox : CheckBox
     {
         private bool hovered;
@@ -309,6 +364,7 @@ namespace PixelPatchStudio
         Source,
         Mask,
         Generate,
+        Relight,
         Result,
         Settings
     }
@@ -380,6 +436,15 @@ namespace PixelPatchStudio
                 graphics.DrawPolygon(pen, star);
                 graphics.DrawLine(pen, cx + 9, cy - 10, cx + 9, cy - 5);
                 graphics.DrawLine(pen, cx + 6.5f, cy - 7.5f, cx + 11.5f, cy - 7.5f);
+            }
+            else if (Kind == NavIconKind.Relight)
+            {
+                graphics.DrawEllipse(pen, cx - 7, cy - 7, 14, 14);
+                for (int i = 0; i < 8; i++)
+                {
+                    double angle = i * Math.PI / 4d;
+                    graphics.DrawLine(pen, cx + (float)Math.Cos(angle) * 10f, cy + (float)Math.Sin(angle) * 10f, cx + (float)Math.Cos(angle) * 14f, cy + (float)Math.Sin(angle) * 14f);
+                }
             }
             else if (Kind == NavIconKind.Result)
             {

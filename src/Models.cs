@@ -15,6 +15,42 @@ namespace PixelPatchStudio
         Erase
     }
 
+    internal enum SelectionTool
+    {
+        Brush,
+        SmartSelect,
+        FreehandLasso,
+        MagneticLasso
+    }
+
+    internal enum MaskViewMode
+    {
+        Overlay,
+        BlackWhite,
+        Outline
+    }
+
+    internal enum GenerationOperation
+    {
+        Repaint,
+        Relight
+    }
+
+    internal sealed class GenerationPlan
+    {
+        public ApiProvider Provider;
+        public int CandidateCount;
+
+        internal static GenerationPlan Create(ApiProvider provider, int requestedCount)
+        {
+            return new GenerationPlan
+            {
+                Provider = provider,
+                CandidateCount = Math.Max(1, Math.Min(4, requestedCount))
+            };
+        }
+    }
+
     internal static class GeminiResolution
     {
         internal static readonly string[] Values = { "Auto", "1K", "2K", "4K" };

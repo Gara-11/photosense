@@ -1,7 +1,7 @@
-<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+<Project ToolsVersion="15.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
     <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <OutputType>WinExe</OutputType>
     <RootNamespace>PixelPatchStudio</RootNamespace>
     <AssemblyName>PhotoSense</AssemblyName>
@@ -36,12 +36,16 @@
     <Compile Include="src\ImageCanvas.cs" />
     <Compile Include="src\ImageComposer.cs" />
     <Compile Include="src\MainForm.cs" />
+    <Compile Include="src\MainForm.Operations.cs" />
     <Compile Include="src\Models.cs" />
     <Compile Include="src\PhotoshopBridge.cs" />
     <Compile Include="src\Program.cs" />
     <Compile Include="src\RealEsrganService.cs" />
     <Compile Include="src\SettingsDialog.cs" />
+    <Compile Include="src\SettingsStore.cs" />
+    <Compile Include="src\SmartSelection.cs" />
     <Compile Include="src\UiTheme.cs" />
     <Compile Include="src\UiScale.cs" />
   </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

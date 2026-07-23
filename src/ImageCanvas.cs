@@ -46,10 +46,19 @@ namespace PixelPatchStudio
         private Bitmap interactiveSource;
         private Bitmap interactivePreview;
         private Bitmap interactiveOverlay;
+        private SmartSelectionEngine smartSelection;
         private readonly Stack<MaskHistoryEntry> undo = new Stack<MaskHistoryEntry>();
         private readonly Stack<MaskHistoryEntry> redo = new Stack<MaskHistoryEntry>();
         private readonly Timer interactionSettleTimer;
         private Dictionary<long, MaskTile> activeStrokeTiles;
+        private readonly List<PointF> magneticAnchors = new List<PointF>();
+        private readonly List<List<PointF>> magneticSegments = new List<List<PointF>>();
+        private readonly List<PointF> freehandPath = new List<PointF>();
+        private List<PointF> magneticPreviewPath;
+        private Point lastMagneticPreviewMouse = new Point(-10000, -10000);
+        private bool magneticSubtract;
+        private bool drawingFreehand;
+        private bool freehandSubtract;
         private PaintMode activeStrokeMode;
         private float zoom = 1f;
         private PointF pan;
@@ -60,6 +69,8 @@ namespace PixelPatchStudio
         private bool spaceDown;
         private bool maskHasContent;
         private PaintMode mode = PaintMode.Add;
+        private SelectionTool selectionTool = SelectionTool.Brush;
+        private MaskViewMode maskViewMode = MaskViewMode.Overlay;
         private int brushSize = 80;
         private bool showMaskOverlay = true;
         private bool fastInteraction;
@@ -67,6 +78,9 @@ namespace PixelPatchStudio
         public event EventHandler ViewChanged;
         public event EventHandler MaskChanged;
         public event EventHandler BrushChanged;
+        public event EventHandler MaskViewChanged;
+        public event EventHandler ToolChanged;
+        public event EventHandler PaintModeChanged;
 
         public ImageCanvas()
         {
@@ -96,6 +110,32 @@ namespace PixelPatchStudio
             }
         }
         public float Zoom { get { return zoom; } }
+        public string LastSelectionMessage { get; private set; }
+        public SelectionTool Tool
+        {
+            get { return selectionTool; }
+            set
+            {
+                if (selectionTool == value) return;
+                CancelMagneticLasso();
+                CancelFreehandLasso();
+                selectionTool = value;
+                UpdateToolCursor();
+                if (ToolChanged != null) ToolChanged(this, EventArgs.Empty);
+                Invalidate();
+            }
+        }
+        public MaskViewMode MaskViewMode
+        {
+            get { return maskViewMode; }
+            set
+            {
+                if (maskViewMode == value) return;
+                maskViewMode = value;
+                RebuildOverlay();
+                if (MaskViewChanged != null) MaskViewChanged(this, EventArgs.Empty);
+            }
+        }
         public PaintMode Mode
         {
             get { return mode; }
@@ -105,6 +145,7 @@ namespace PixelPatchStudio
                 Rectangle oldCursor = BrushPreviewBounds(lastMouse);
                 mode = value;
                 if (!oldCursor.IsEmpty) Invalidate(oldCursor);
+                if (PaintModeChanged != null) PaintModeChanged(this, EventArgs.Empty);
             }
         }
         public int BrushSize
@@ -127,6 +168,7 @@ namespace PixelPatchStudio
             DisposeImages();
             source = new Bitmap(image);
             interactiveSource = BuildInteractiveBitmap(source, InteractivePreviewMaxEdge, InterpolationMode.HighQualityBicubic);
+            smartSelection = new SmartSelectionEngine(source);
             mask = NewMask(source.Width, source.Height);
             overlay = NewOverlay(source.Width, source.Height);
             interactiveOverlay = NewOverlay(interactiveSource.Width, interactiveSource.Height);
@@ -141,6 +183,12 @@ namespace PixelPatchStudio
 
         public Bitmap GetSourceCopy() { return source == null ? null : new Bitmap(source); }
         public Bitmap GetMaskCopy() { return mask == null ? null : new Bitmap(mask); }
+        public string ConsumeLastSelectionMessage()
+        {
+            string message = LastSelectionMessage;
+            LastSelectionMessage = null;
+            return message;
+        }
 
         public void SetPreview(Bitmap value)
         {
@@ -176,6 +224,36 @@ namespace PixelPatchStudio
             return mask.GetPixel(x, y);
         }
 
+        internal void DebugSmartSelect(PointF point, bool add)
+        {
+            ApplySmartSelection(point, add);
+        }
+
+        internal List<PointF> DebugSnapSegment(PointF from, PointF to)
+        {
+            if (smartSelection == null) throw new InvalidOperationException("测试边缘吸附前需要载入图片。");
+            return smartSelection.SnapSegment(from, to);
+        }
+
+        internal Rectangle DebugToolCursorBounds(Point point)
+        {
+            return ToolCursorBounds(point);
+        }
+
+        internal void DebugApplyMagneticLasso(IList<PointF> points, bool add)
+        {
+            if (points == null || points.Count < 3) throw new ArgumentException("套索至少需要三个点。", "points");
+            LastSelectionMessage = add ? "磁性套索已添加选区" : "磁性套索已排除选区";
+            ApplyLassoPolygon(new List<PointF>(points), add);
+        }
+
+        internal void DebugApplyFreehandLasso(IList<PointF> points, bool add)
+        {
+            if (points == null || points.Count < 3) throw new ArgumentException("自由套索至少需要三个点。", "points");
+            LastSelectionMessage = add ? "自由套索已添加选区" : "自由套索已排除选区";
+            ApplyLassoPolygon(SmoothFreehandPath(new List<PointF>(points)), add);
+        }
+
         internal int DebugUndoTileCount
         {
             get
@@ -203,9 +281,9 @@ namespace PixelPatchStudio
             if (mask != null) mask.Dispose();
             if (overlay != null) overlay.Dispose();
             mask = ResizeMask(value, source.Width, source.Height);
-            overlay = BuildOverlay(mask);
+            overlay = BuildOverlay(mask, maskViewMode);
             RebuildInteractiveOverlay();
-            maskHasContent = true;
+            maskHasContent = ImageComposer.HasSelection(mask);
             ClearHistory(redo);
             RaiseMaskChanged();
             InvalidateViewCache();
@@ -216,23 +294,10 @@ namespace PixelPatchStudio
             if (mask == null) return;
             if (maskHasContent) SaveFullUndo();
             using (Graphics graphics = Graphics.FromImage(mask)) graphics.Clear(Color.Black);
-            using (Graphics graphics = Graphics.FromImage(overlay))
-            {
-                graphics.CompositingMode = CompositingMode.SourceCopy;
-                graphics.Clear(Color.Transparent);
-            }
-            if (interactiveOverlay != null)
-            {
-                using (Graphics graphics = Graphics.FromImage(interactiveOverlay))
-                {
-                    graphics.CompositingMode = CompositingMode.SourceCopy;
-                    graphics.Clear(Color.Transparent);
-                }
-            }
             maskHasContent = false;
             ClearHistory(redo);
+            RebuildOverlay();
             RaiseMaskChanged();
-            InvalidateViewCache();
         }
 
         public void InvertMask()
@@ -248,12 +313,36 @@ namespace PixelPatchStudio
                 }
             }
             if (overlay != null) overlay.Dispose();
-            overlay = BuildOverlay(mask);
+            overlay = BuildOverlay(mask, maskViewMode);
             RebuildInteractiveOverlay();
-            maskHasContent = true;
+            maskHasContent = ImageComposer.HasSelection(mask);
             ClearHistory(redo);
             RaiseMaskChanged();
             InvalidateViewCache();
+        }
+
+        public void ExpandMask(int radius)
+        {
+            if (mask == null) return;
+            using (Bitmap refined = ImageComposer.ExpandMask(mask, radius)) ApplyRefinedMask(refined);
+        }
+
+        public void ContractMask(int radius)
+        {
+            if (mask == null) return;
+            using (Bitmap refined = ImageComposer.ContractMask(mask, radius)) ApplyRefinedMask(refined);
+        }
+
+        public void FeatherMask(int radius)
+        {
+            if (mask == null) return;
+            using (Bitmap refined = ImageComposer.FeatherMask(mask, radius)) ApplyRefinedMask(refined);
+        }
+
+        public void SmoothMask(int radius)
+        {
+            if (mask == null) return;
+            using (Bitmap refined = ImageComposer.SmoothMask(mask, radius)) ApplyRefinedMask(refined);
         }
 
         public void UndoMask()
@@ -334,20 +423,21 @@ namespace PixelPatchStudio
                 Rectangle paintArea = Rectangle.Intersect(e.ClipRectangle, ClientRectangle);
                 e.Graphics.CompositingMode = CompositingMode.SourceCopy;
                 e.Graphics.DrawImage(viewCache, paintArea, paintArea, GraphicsUnit.Pixel);
-                if (ShowMaskOverlay && overlayViewCache != null)
+                if (ShowMaskOverlay && overlayViewCache != null && (maskHasContent || maskViewMode == MaskViewMode.BlackWhite))
                 {
                     e.Graphics.CompositingMode = CompositingMode.SourceOver;
                     e.Graphics.DrawImage(overlayViewCache, paintArea, paintArea, GraphicsUnit.Pixel);
                 }
             }
 
-            if (!panning && ClientRectangle.Contains(lastMouse))
+            if (!panning && ClientRectangle.Contains(lastMouse) && selectionTool == SelectionTool.Brush)
             {
                 float diameter = Math.Max(2f, brushSize * zoom);
                 RectangleF circle = new RectangleF(lastMouse.X - diameter / 2f, lastMouse.Y - diameter / 2f, diameter, diameter);
                 using (Pen shadow = new Pen(Color.FromArgb(190, 0, 0, 0), 3f)) e.Graphics.DrawEllipse(shadow, circle);
                 using (Pen previewPen = new Pen(mode == PaintMode.Add ? Color.White : Color.FromArgb(255, 255, 120, 120), 1f)) e.Graphics.DrawEllipse(previewPen, circle);
             }
+            DrawSelectionToolOverlay(e.Graphics);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -362,8 +452,30 @@ namespace PixelPatchStudio
                 Cursor = Cursors.Hand;
                 return;
             }
+            if (selectionTool == SelectionTool.SmartSelect && (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right))
+            {
+                MaskViewMode = MaskViewMode.Overlay;
+                ShowMaskOverlay = true;
+                ApplySmartSelection(ScreenToImage(e.Location), e.Button == MouseButtons.Left);
+                return;
+            }
+            if (selectionTool == SelectionTool.FreehandLasso && (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right))
+            {
+                MaskViewMode = MaskViewMode.Overlay;
+                ShowMaskOverlay = true;
+                BeginFreehandLasso(ScreenToImage(e.Location), e.Button == MouseButtons.Right);
+                return;
+            }
+            if (selectionTool == SelectionTool.MagneticLasso && (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right))
+            {
+                MaskViewMode = MaskViewMode.Overlay;
+                ShowMaskOverlay = true;
+                AddMagneticAnchor(ScreenToImage(e.Location), e.Button == MouseButtons.Right, e.Clicks > 1);
+                return;
+            }
             if (e.Button == MouseButtons.Left || e.Button == MouseButtons.Right)
             {
+                MaskViewMode = MaskViewMode.Overlay;
                 ShowMaskOverlay = true;
                 BeginStrokeHistory();
                 ClearHistory(redo);
@@ -387,11 +499,36 @@ namespace PixelPatchStudio
                 ScheduleFastInteraction();
                 return;
             }
-            if (painting)
+            if (drawingFreehand)
+            {
+                PointF current = ScreenToImage(e.Location);
+                PointF previous = freehandPath[freehandPath.Count - 1];
+                float dxImage = current.X - previous.X;
+                float dyImage = current.Y - previous.Y;
+                float minimumDistance = Math.Max(0.75f, 2.5f / Math.Max(0.02f, zoom));
+                if (dxImage * dxImage + dyImage * dyImage >= minimumDistance * minimumDistance)
+                {
+                    freehandPath.Add(current);
+                    Rectangle dirty = ScreenLineBounds(ImageToScreen(previous), ImageToScreen(current), 8);
+                    Invalidate(dirty);
+                }
+            }
+            else if (painting)
             {
                 PointF current = ScreenToImage(e.Location);
                 DrawStroke(lastImagePoint, current, activeStrokeMode);
                 lastImagePoint = current;
+            }
+            else if (selectionTool == SelectionTool.MagneticLasso && magneticAnchors.Count > 0)
+            {
+                int dx = lastMouse.X - lastMagneticPreviewMouse.X;
+                int dy = lastMouse.Y - lastMagneticPreviewMouse.Y;
+                if (dx * dx + dy * dy >= 9)
+                {
+                    magneticPreviewPath = smartSelection.SnapSegment(magneticAnchors[magneticAnchors.Count - 1], ScreenToImage(lastMouse));
+                    lastMagneticPreviewMouse = lastMouse;
+                    Invalidate();
+                }
             }
             else InvalidateCursorMove(oldMouse, lastMouse);
         }
@@ -399,6 +536,13 @@ namespace PixelPatchStudio
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
+            if (drawingFreehand)
+            {
+                FinishFreehandLasso(ScreenToImage(e.Location));
+                panning = false;
+                UpdateToolCursor();
+                return;
+            }
             if (painting)
             {
                 CommitStrokeHistory();
@@ -406,16 +550,19 @@ namespace PixelPatchStudio
             }
             painting = false;
             panning = false;
-            Cursor = Cursors.Default;
-            Invalidate(BrushPreviewBounds(lastMouse));
+            UpdateToolCursor();
+            Invalidate(ToolCursorBounds(lastMouse));
         }
 
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
+            if (drawingFreehand) return;
             Point oldMouse = lastMouse;
             lastMouse = new Point(-10000, -10000);
-            Invalidate(BrushPreviewBounds(oldMouse));
+            magneticPreviewPath = null;
+            if (selectionTool == SelectionTool.MagneticLasso) Invalidate();
+            else Invalidate(ToolCursorBounds(oldMouse));
         }
 
         protected override void OnMouseWheel(MouseEventArgs e)
@@ -433,7 +580,8 @@ namespace PixelPatchStudio
         protected override bool IsInputKey(Keys keyData)
         {
             Keys key = keyData & Keys.KeyCode;
-            if (key == Keys.Space || key == Keys.OemOpenBrackets || key == Keys.OemCloseBrackets) return true;
+            if (key == Keys.Space || key == Keys.OemOpenBrackets || key == Keys.OemCloseBrackets ||
+                key == Keys.Enter || key == Keys.Escape || key == Keys.Back) return true;
             return base.IsInputKey(keyData);
         }
 
@@ -441,8 +589,15 @@ namespace PixelPatchStudio
         {
             base.OnKeyDown(e);
             if (e.KeyCode == Keys.Space) { spaceDown = true; Cursor = Cursors.Hand; e.Handled = true; }
-            else if (e.KeyCode == Keys.B) { Mode = PaintMode.Add; e.Handled = true; }
-            else if (e.KeyCode == Keys.E) { Mode = PaintMode.Erase; e.Handled = true; }
+            else if (e.KeyCode == Keys.B) { Tool = SelectionTool.Brush; Mode = PaintMode.Add; e.Handled = true; }
+            else if (e.KeyCode == Keys.E) { Tool = SelectionTool.Brush; Mode = PaintMode.Erase; e.Handled = true; }
+            else if (e.KeyCode == Keys.S) { Tool = SelectionTool.SmartSelect; e.Handled = true; }
+            else if (e.KeyCode == Keys.P) { Tool = SelectionTool.FreehandLasso; e.Handled = true; }
+            else if (e.KeyCode == Keys.L) { Tool = SelectionTool.MagneticLasso; e.Handled = true; }
+            else if (e.KeyCode == Keys.Enter && selectionTool == SelectionTool.MagneticLasso) { FinishMagneticLasso(); e.Handled = true; }
+            else if (e.KeyCode == Keys.Escape && selectionTool == SelectionTool.MagneticLasso) { CancelMagneticLasso(); e.Handled = true; }
+            else if (e.KeyCode == Keys.Escape && selectionTool == SelectionTool.FreehandLasso) { CancelFreehandLasso(); e.Handled = true; }
+            else if (e.KeyCode == Keys.Back && selectionTool == SelectionTool.MagneticLasso) { RemoveLastMagneticAnchor(); e.Handled = true; }
             else if (e.KeyCode == Keys.OemOpenBrackets) { BrushSize -= Math.Max(2, BrushSize / 10); e.Handled = true; }
             else if (e.KeyCode == Keys.OemCloseBrackets) { BrushSize += Math.Max(2, BrushSize / 10); e.Handled = true; }
             else if (e.Control && e.KeyCode == Keys.D0) { FitToWindow(); e.Handled = true; }
@@ -453,7 +608,7 @@ namespace PixelPatchStudio
         protected override void OnKeyUp(KeyEventArgs e)
         {
             base.OnKeyUp(e);
-            if (e.KeyCode == Keys.Space) { spaceDown = false; if (!panning) Cursor = Cursors.Default; }
+            if (e.KeyCode == Keys.Space) { spaceDown = false; if (!panning) UpdateToolCursor(); }
         }
 
         protected override void Dispose(bool disposing)
@@ -499,6 +654,290 @@ namespace PixelPatchStudio
             Rectangle dirtyPixels = Rectangle.Ceiling(dirty);
             UpdateOverlayViewCache(dirtyPixels);
             Invalidate(dirtyPixels);
+        }
+
+        private void ApplySmartSelection(PointF point, bool add)
+        {
+            if (mask == null || smartSelection == null) return;
+            SmartRegion region = smartSelection.Select(point);
+            if (region.PixelCount == 0) return;
+            BeginStrokeHistory();
+            CaptureTilesInRectangle(region.OriginalBounds);
+            ClearHistory(redo);
+            try
+            {
+                smartSelection.ApplyRegion(mask, region, add);
+            }
+            finally
+            {
+                CommitStrokeHistory();
+            }
+            maskHasContent = add || ImageComposer.HasSelection(mask);
+            RebuildOverlay();
+            double coverage = region.PixelCount / (double)(region.Width * region.Height);
+            LastSelectionMessage = (add ? "智能点选已添加" : "智能点选已排除") +
+                " · 识别区域约 " + (coverage * 100d).ToString(coverage < 0.01 ? "0.00" : "0.0") + "% · 可继续点击修正";
+            RaiseMaskChanged();
+        }
+
+        private void BeginFreehandLasso(PointF point, bool subtract)
+        {
+            CancelMagneticLasso();
+            freehandPath.Clear();
+            freehandPath.Add(point);
+            freehandSubtract = subtract || (ModifierKeys & Keys.Alt) == Keys.Alt;
+            drawingFreehand = true;
+            Capture = true;
+            LastSelectionMessage = freehandSubtract ? "自由套索：正在绘制排除区域" : "自由套索：正在绘制添加区域";
+            Invalidate();
+        }
+
+        private void FinishFreehandLasso(PointF point)
+        {
+            if (!drawingFreehand) return;
+            drawingFreehand = false;
+            Capture = false;
+            if (freehandPath.Count > 0)
+            {
+                PointF previous = freehandPath[freehandPath.Count - 1];
+                float dx = point.X - previous.X;
+                float dy = point.Y - previous.Y;
+                if (dx * dx + dy * dy > 0.25f) freehandPath.Add(point);
+            }
+            bool add = !freehandSubtract;
+            if (freehandPath.Count >= 3)
+            {
+                LastSelectionMessage = add
+                    ? "自由套索已添加选区 · 未进行边缘吸附 · 可用 Ctrl+Z 撤销"
+                    : "自由套索已排除选区 · 可用 Ctrl+Z 撤销";
+                ApplyLassoPolygon(SmoothFreehandPath(freehandPath), add);
+            }
+            freehandPath.Clear();
+            Invalidate();
+        }
+
+        private void CancelFreehandLasso()
+        {
+            if (!drawingFreehand && freehandPath.Count == 0) return;
+            drawingFreehand = false;
+            Capture = false;
+            freehandPath.Clear();
+            LastSelectionMessage = "自由套索已取消";
+            Invalidate();
+        }
+
+        private static List<PointF> SmoothFreehandPath(IList<PointF> input)
+        {
+            List<PointF> output = new List<PointF>(input);
+            if (output.Count < 5) return output;
+            for (int pass = 0; pass < 2; pass++)
+            {
+                PointF[] smoothed = output.ToArray();
+                for (int index = 1; index < output.Count - 1; index++)
+                {
+                    PointF previous = output[index - 1];
+                    PointF current = output[index];
+                    PointF next = output[index + 1];
+                    smoothed[index] = new PointF(
+                        previous.X * 0.2f + current.X * 0.6f + next.X * 0.2f,
+                        previous.Y * 0.2f + current.Y * 0.6f + next.Y * 0.2f);
+                }
+                output = new List<PointF>(smoothed);
+            }
+            return output;
+        }
+
+        private void AddMagneticAnchor(PointF point, bool subtract, bool finish)
+        {
+            if (smartSelection == null) return;
+            if (magneticAnchors.Count == 0)
+            {
+                magneticSubtract = subtract || (ModifierKeys & Keys.Alt) == Keys.Alt;
+                magneticAnchors.Add(point);
+                magneticPreviewPath = null;
+                lastMagneticPreviewMouse = lastMouse;
+                LastSelectionMessage = magneticSubtract ? "磁性套索：正在创建排除区域" : "磁性套索：正在创建添加区域";
+                Invalidate();
+                return;
+            }
+
+            PointF previous = magneticAnchors[magneticAnchors.Count - 1];
+            float dx = point.X - previous.X;
+            float dy = point.Y - previous.Y;
+            if (dx * dx + dy * dy > 1f)
+            {
+                magneticSegments.Add(smartSelection.SnapSegment(previous, point));
+                magneticAnchors.Add(point);
+            }
+            magneticPreviewPath = null;
+            lastMagneticPreviewMouse = lastMouse;
+            if (finish) FinishMagneticLasso();
+            else Invalidate();
+        }
+
+        private void FinishMagneticLasso()
+        {
+            if (magneticAnchors.Count < 3 || smartSelection == null)
+            {
+                LastSelectionMessage = "磁性套索至少需要 3 个锚点；继续单击添加，或按 Esc 取消";
+                Invalidate();
+                return;
+            }
+
+            List<PointF> polygon = new List<PointF>();
+            polygon.Add(magneticAnchors[0]);
+            foreach (List<PointF> segment in magneticSegments) AppendSegment(polygon, segment);
+            AppendSegment(polygon, smartSelection.SnapSegment(
+                magneticAnchors[magneticAnchors.Count - 1], magneticAnchors[0]));
+            bool add = !magneticSubtract;
+            LastSelectionMessage = add
+                ? "磁性套索已添加选区 · 边缘已自动吸附 · 可用 Ctrl+Z 撤销"
+                : "磁性套索已排除选区 · 可用 Ctrl+Z 撤销";
+            ApplyLassoPolygon(polygon, add);
+            magneticAnchors.Clear();
+            magneticSegments.Clear();
+            magneticPreviewPath = null;
+            lastMagneticPreviewMouse = new Point(-10000, -10000);
+            Invalidate();
+        }
+
+        private void ApplyLassoPolygon(List<PointF> polygon, bool add)
+        {
+            if (mask == null || polygon == null || polygon.Count < 3) return;
+            float minX = polygon[0].X;
+            float minY = polygon[0].Y;
+            float maxX = polygon[0].X;
+            float maxY = polygon[0].Y;
+            for (int index = 1; index < polygon.Count; index++)
+            {
+                minX = Math.Min(minX, polygon[index].X);
+                minY = Math.Min(minY, polygon[index].Y);
+                maxX = Math.Max(maxX, polygon[index].X);
+                maxY = Math.Max(maxY, polygon[index].Y);
+            }
+            BeginStrokeHistory();
+            CaptureTilesInRectangle(Rectangle.Ceiling(RectangleF.FromLTRB(minX - 2f, minY - 2f, maxX + 2f, maxY + 2f)));
+            ClearHistory(redo);
+            try
+            {
+                using (Graphics graphics = Graphics.FromImage(mask))
+                using (Brush fill = new SolidBrush(add ? Color.White : Color.Black))
+                {
+                    graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                    graphics.CompositingMode = CompositingMode.SourceCopy;
+                    graphics.FillPolygon(fill, polygon.ToArray(), FillMode.Winding);
+                }
+            }
+            finally
+            {
+                CommitStrokeHistory();
+            }
+            maskHasContent = add || ImageComposer.HasSelection(mask);
+            RebuildOverlay();
+            RaiseMaskChanged();
+        }
+
+        private static void AppendSegment(List<PointF> target, IList<PointF> segment)
+        {
+            if (target == null || segment == null) return;
+            for (int index = target.Count == 0 ? 0 : 1; index < segment.Count; index++)
+                target.Add(segment[index]);
+        }
+
+        private void RemoveLastMagneticAnchor()
+        {
+            if (magneticAnchors.Count == 0) return;
+            magneticAnchors.RemoveAt(magneticAnchors.Count - 1);
+            if (magneticSegments.Count > 0) magneticSegments.RemoveAt(magneticSegments.Count - 1);
+            magneticPreviewPath = null;
+            LastSelectionMessage = magneticAnchors.Count == 0 ? "磁性套索已取消" : "已撤销上一个套索锚点";
+            Invalidate();
+        }
+
+        private void CancelMagneticLasso()
+        {
+            if (magneticAnchors.Count == 0 && magneticSegments.Count == 0 && magneticPreviewPath == null) return;
+            magneticAnchors.Clear();
+            magneticSegments.Clear();
+            magneticPreviewPath = null;
+            lastMagneticPreviewMouse = new Point(-10000, -10000);
+            Invalidate();
+        }
+
+        private void DrawSelectionToolOverlay(Graphics graphics)
+        {
+            if (source == null || panning) return;
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            if (selectionTool == SelectionTool.SmartSelect && ClientRectangle.Contains(lastMouse))
+            {
+                using (Pen shadow = new Pen(Color.FromArgb(190, 0, 0, 0), 4f))
+                using (Pen accent = new Pen(UiTheme.AccentBright, 2f))
+                {
+                    graphics.DrawEllipse(shadow, lastMouse.X - 9, lastMouse.Y - 9, 18, 18);
+                    graphics.DrawEllipse(accent, lastMouse.X - 9, lastMouse.Y - 9, 18, 18);
+                    graphics.DrawLine(accent, lastMouse.X - 13, lastMouse.Y, lastMouse.X - 4, lastMouse.Y);
+                    graphics.DrawLine(accent, lastMouse.X + 4, lastMouse.Y, lastMouse.X + 13, lastMouse.Y);
+                    graphics.DrawLine(accent, lastMouse.X, lastMouse.Y - 13, lastMouse.X, lastMouse.Y - 4);
+                    graphics.DrawLine(accent, lastMouse.X, lastMouse.Y + 4, lastMouse.X, lastMouse.Y + 13);
+                }
+                return;
+            }
+            if (selectionTool == SelectionTool.FreehandLasso)
+            {
+                using (Pen shadow = new Pen(Color.FromArgb(210, 0, 0, 0), 4f))
+                using (Pen freehand = new Pen(freehandSubtract ? Color.FromArgb(255, 235, 98, 98) : UiTheme.AccentBright, 2f))
+                {
+                    DrawImagePath(graphics, shadow, freehandPath);
+                    DrawImagePath(graphics, freehand, freehandPath);
+                }
+                return;
+            }
+            if (selectionTool != SelectionTool.MagneticLasso) return;
+
+            using (Pen shadow = new Pen(Color.FromArgb(210, 0, 0, 0), 4f))
+            using (Pen committed = new Pen(UiTheme.AccentBright, 2f))
+            using (Pen previewPen = new Pen(Color.FromArgb(220, 255, 255, 255), 1.5f))
+            {
+                previewPen.DashStyle = DashStyle.Dash;
+                foreach (List<PointF> segment in magneticSegments) DrawImagePath(graphics, shadow, segment);
+                foreach (List<PointF> segment in magneticSegments) DrawImagePath(graphics, committed, segment);
+                if (magneticPreviewPath != null)
+                {
+                    DrawImagePath(graphics, shadow, magneticPreviewPath);
+                    DrawImagePath(graphics, previewPen, magneticPreviewPath);
+                }
+                foreach (PointF anchor in magneticAnchors)
+                {
+                    PointF screen = ImageToScreen(anchor);
+                    using (Brush fill = new SolidBrush(magneticSubtract ? Color.FromArgb(255, 235, 98, 98) : UiTheme.AccentBright))
+                    {
+                        graphics.FillEllipse(fill, screen.X - 4f, screen.Y - 4f, 8f, 8f);
+                        graphics.DrawEllipse(shadow, screen.X - 5f, screen.Y - 5f, 10f, 10f);
+                    }
+                }
+            }
+        }
+
+        private void DrawImagePath(Graphics graphics, Pen pen, IList<PointF> points)
+        {
+            if (points == null || points.Count < 2) return;
+            PointF[] screen = new PointF[points.Count];
+            for (int index = 0; index < points.Count; index++) screen[index] = ImageToScreen(points[index]);
+            graphics.DrawLines(pen, screen);
+        }
+
+        private PointF ImageToScreen(PointF point)
+        {
+            return new PointF(point.X * zoom + pan.X, point.Y * zoom + pan.Y);
+        }
+
+        private void UpdateToolCursor()
+        {
+            if (panning || spaceDown) Cursor = Cursors.Hand;
+            else if (selectionTool == SelectionTool.SmartSelect ||
+                selectionTool == SelectionTool.FreehandLasso ||
+                selectionTool == SelectionTool.MagneticLasso) Cursor = Cursors.Cross;
+            else Cursor = Cursors.Default;
         }
 
         private void SaveFullUndo()
@@ -609,7 +1048,7 @@ namespace PixelPatchStudio
                 if (mask != null) mask.Dispose();
                 mask = new Bitmap(entry.FullMask);
                 if (overlay != null) overlay.Dispose();
-                overlay = BuildOverlay(mask);
+                overlay = BuildOverlay(mask, maskViewMode);
             }
             else if (entry.Tiles != null)
             {
@@ -621,11 +1060,11 @@ namespace PixelPatchStudio
                     foreach (MaskTile tile in entry.Tiles)
                     {
                         maskGraphics.DrawImageUnscaled(tile.Pixels, tile.Bounds.Location);
-                        using (Bitmap overlayTile = BuildOverlay(tile.Pixels)) overlayGraphics.DrawImageUnscaled(overlayTile, tile.Bounds.Location);
+                        using (Bitmap overlayTile = BuildOverlay(tile.Pixels, maskViewMode)) overlayGraphics.DrawImageUnscaled(overlayTile, tile.Bounds.Location);
                     }
                 }
             }
-            maskHasContent = true;
+            maskHasContent = ImageComposer.HasSelection(mask);
             RebuildInteractiveOverlay();
             RaiseMaskChanged();
             InvalidateOverlayViewCache();
@@ -701,6 +1140,11 @@ namespace PixelPatchStudio
 
         internal static Bitmap BuildOverlay(Bitmap selectionMask)
         {
+            return BuildOverlay(selectionMask, MaskViewMode.Overlay);
+        }
+
+        internal static Bitmap BuildOverlay(Bitmap selectionMask, MaskViewMode viewMode)
+        {
             Bitmap result = NewOverlay(selectionMask.Width, selectionMask.Height);
             Rectangle rect = new Rectangle(0, 0, selectionMask.Width, selectionMask.Height);
             Bitmap normalized = selectionMask.PixelFormat == PixelFormat.Format32bppArgb
@@ -713,21 +1157,53 @@ namespace PixelPatchStudio
                 int inputStride = Math.Abs(inputData.Stride);
                 int outputStride = Math.Abs(outputData.Stride);
                 byte[] input = new byte[selectionMask.Width * 4];
+                byte[] selectedValues = new byte[selectionMask.Width * selectionMask.Height];
                 byte[] output = new byte[selectionMask.Width * 4];
                 for (int y = 0; y < selectionMask.Height; y++)
                 {
                     IntPtr inputRow = IntPtr.Add(inputData.Scan0, y * inputStride);
-                    IntPtr outputRow = IntPtr.Add(outputData.Scan0, y * outputStride);
                     Marshal.Copy(inputRow, input, 0, input.Length);
                     for (int x = 0; x < selectionMask.Width; x++)
                     {
                         int sourceIndex = x * 4;
-                        int targetIndex = sourceIndex;
-                        int selected = Math.Max(input[sourceIndex], Math.Max(input[sourceIndex + 1], input[sourceIndex + 2]));
-                        output[targetIndex] = 255;
-                        output[targetIndex + 1] = 184;
-                        output[targetIndex + 2] = 52;
-                        output[targetIndex + 3] = (byte)((selected * 105 + 127) / 255);
+                        selectedValues[y * selectionMask.Width + x] = Math.Max(input[sourceIndex], Math.Max(input[sourceIndex + 1], input[sourceIndex + 2]));
+                    }
+                }
+                for (int y = 0; y < selectionMask.Height; y++)
+                {
+                    IntPtr outputRow = IntPtr.Add(outputData.Scan0, y * outputStride);
+                    for (int x = 0; x < selectionMask.Width; x++)
+                    {
+                        int targetIndex = x * 4;
+                        byte selected = selectedValues[y * selectionMask.Width + x];
+                        if (viewMode == MaskViewMode.BlackWhite)
+                        {
+                            output[targetIndex] = selected;
+                            output[targetIndex + 1] = selected;
+                            output[targetIndex + 2] = selected;
+                            output[targetIndex + 3] = 255;
+                        }
+                        else if (viewMode == MaskViewMode.Outline)
+                        {
+                            bool inside = selected >= 128;
+                            bool boundary = (x == 0 && inside) || (x == selectionMask.Width - 1 && inside) ||
+                                (y == 0 && inside) || (y == selectionMask.Height - 1 && inside) ||
+                                (x > 0 && (selectedValues[y * selectionMask.Width + x - 1] >= 128) != inside) ||
+                                (x + 1 < selectionMask.Width && (selectedValues[y * selectionMask.Width + x + 1] >= 128) != inside) ||
+                                (y > 0 && (selectedValues[(y - 1) * selectionMask.Width + x] >= 128) != inside) ||
+                                (y + 1 < selectionMask.Height && (selectedValues[(y + 1) * selectionMask.Width + x] >= 128) != inside);
+                            output[targetIndex] = 50;
+                            output[targetIndex + 1] = 244;
+                            output[targetIndex + 2] = 190;
+                            output[targetIndex + 3] = boundary ? (byte)235 : (byte)0;
+                        }
+                        else
+                        {
+                            output[targetIndex] = 255;
+                            output[targetIndex + 1] = 184;
+                            output[targetIndex + 2] = 52;
+                            output[targetIndex + 3] = (byte)((selected * 105 + 127) / 255);
+                        }
                     }
                     Marshal.Copy(output, 0, outputRow, output.Length);
                 }
@@ -741,6 +1217,25 @@ namespace PixelPatchStudio
             return result;
         }
 
+        private void ApplyRefinedMask(Bitmap refined)
+        {
+            SaveFullUndo();
+            if (mask != null) mask.Dispose();
+            mask = new Bitmap(refined);
+            maskHasContent = ImageComposer.HasSelection(mask);
+            ClearHistory(redo);
+            RebuildOverlay();
+            RaiseMaskChanged();
+        }
+
+        private void RebuildOverlay()
+        {
+            if (overlay != null) overlay.Dispose();
+            overlay = mask == null ? null : BuildOverlay(mask, maskViewMode);
+            RebuildInteractiveOverlay();
+            InvalidateOverlayViewCache();
+        }
+
         private Rectangle BrushPreviewBounds(Point point)
         {
             if (source == null || point.X < -1000 || point.Y < -1000) return Rectangle.Empty;
@@ -749,10 +1244,30 @@ namespace PixelPatchStudio
             return Rectangle.FromLTRB(point.X - radius, point.Y - radius, point.X + radius + 1, point.Y + radius + 1);
         }
 
+        private Rectangle ToolCursorBounds(Point point)
+        {
+            if (source == null || point.X < -1000 || point.Y < -1000) return Rectangle.Empty;
+            if (selectionTool == SelectionTool.SmartSelect)
+            {
+                const int radius = 17;
+                return Rectangle.FromLTRB(point.X - radius, point.Y - radius, point.X + radius + 1, point.Y + radius + 1);
+            }
+            return BrushPreviewBounds(point);
+        }
+
         private void InvalidateCursorMove(Point oldPoint, Point newPoint)
         {
-            Rectangle dirty = Rectangle.Union(BrushPreviewBounds(oldPoint), BrushPreviewBounds(newPoint));
+            Rectangle dirty = Rectangle.Union(ToolCursorBounds(oldPoint), ToolCursorBounds(newPoint));
             if (!dirty.IsEmpty) Invalidate(dirty);
+        }
+
+        private static Rectangle ScreenLineBounds(PointF from, PointF to, int padding)
+        {
+            return Rectangle.FromLTRB(
+                (int)Math.Floor(Math.Min(from.X, to.X)) - padding,
+                (int)Math.Floor(Math.Min(from.Y, to.Y)) - padding,
+                (int)Math.Ceiling(Math.Max(from.X, to.X)) + padding + 1,
+                (int)Math.Ceiling(Math.Max(from.Y, to.Y)) + padding + 1);
         }
 
         private void EnsureViewCache()
@@ -788,7 +1303,7 @@ namespace PixelPatchStudio
                 graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
                 graphics.PixelOffsetMode = PixelOffsetMode.Half;
                 graphics.DrawImage(baseImage, target, new RectangleF(0f, 0f, baseImage.Width, baseImage.Height), GraphicsUnit.Pixel);
-                if (ShowMaskOverlay && maskHasContent && interactiveOverlay != null)
+                if (ShowMaskOverlay && (maskHasContent || maskViewMode == MaskViewMode.BlackWhite) && interactiveOverlay != null)
                 {
                     graphics.CompositingMode = CompositingMode.SourceOver;
                     graphics.InterpolationMode = InterpolationMode.NearestNeighbor;
@@ -950,6 +1465,9 @@ namespace PixelPatchStudio
         private void DisposeImages()
         {
             CancelFastInteraction();
+            CancelMagneticLasso();
+            CancelFreehandLasso();
+            smartSelection = null;
             if (source != null) { source.Dispose(); source = null; }
             if (preview != null) { preview.Dispose(); preview = null; }
             if (mask != null) { mask.Dispose(); mask = null; }

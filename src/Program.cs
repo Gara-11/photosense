@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
@@ -151,6 +152,33 @@ namespace PixelPatchStudio
                 {
                     Console.Error.WriteLine("SETTINGS_RENDER_FAILED " + ex);
                     return 8;
+                }
+            }
+            if (args.Length > 4 && string.Equals(args[0], "--smart-selection-probe", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    int pointX;
+                    int pointY;
+                    if (!int.TryParse(args[2], out pointX) || !int.TryParse(args[3], out pointY))
+                        throw new ArgumentException("Smart selection probe coordinates must be integers.");
+                    using (Image loaded = Image.FromFile(args[1]))
+                    using (Bitmap source = new Bitmap(loaded))
+                    using (Bitmap mask = new Bitmap(source.Width, source.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                    {
+                        using (Graphics graphics = Graphics.FromImage(mask)) graphics.Clear(Color.Black);
+                        SmartSelectionEngine engine = new SmartSelectionEngine(source);
+                        SmartRegion region = engine.Select(new PointF(pointX, pointY));
+                        engine.ApplyRegion(mask, region, true);
+                        mask.Save(args[4], System.Drawing.Imaging.ImageFormat.Png);
+                        Console.WriteLine("SMART_SELECTION_PROBE_OK " + region.PixelCount);
+                    }
+                    return 0;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine("SMART_SELECTION_PROBE_FAILED " + ex);
+                    return 9;
                 }
             }
             if (args.Length > 0 && string.Equals(args[0], "--photoshop-probe", StringComparison.OrdinalIgnoreCase))
@@ -366,8 +394,8 @@ namespace PixelPatchStudio
                         Assert(apiMask.GetPixel(0, 0).A == 255, "OpenAI 蒙版外必须不透明");
                         Assert(apiMask.GetPixel(3, 3).A == 0, "OpenAI 重绘区必须透明");
                     }
-                using (Bitmap renderedMask = new Bitmap(2, 1))
-                {
+                    using (Bitmap renderedMask = new Bitmap(2, 1))
+                    {
                         renderedMask.SetPixel(0, 0, Color.Black);
                         renderedMask.SetPixel(1, 0, Color.White);
                         using (Bitmap renderedOverlay = ImageCanvas.BuildOverlay(renderedMask))
@@ -375,7 +403,98 @@ namespace PixelPatchStudio
                             Assert(renderedOverlay.GetPixel(0, 0).A == 0, "未选区预览必须完全透明");
                             Assert(renderedOverlay.GetPixel(1, 0).A == 105, "选区预览透明度错误");
                         }
+                        using (Bitmap blackWhiteOverlay = ImageCanvas.BuildOverlay(renderedMask, MaskViewMode.BlackWhite))
+                        {
+                            Assert(blackWhiteOverlay.GetPixel(0, 0).A == 255 &&
+                                blackWhiteOverlay.GetPixel(0, 0).R == 0 &&
+                                blackWhiteOverlay.GetPixel(1, 0).A == 255 &&
+                                blackWhiteOverlay.GetPixel(1, 0).R == 255,
+                                "黑白蒙版预览没有忠实显示选区");
+                        }
                         Assert(Math.Abs(ImageComposer.SelectionCoverage(renderedMask) - 0.5) < 0.001, "蒙版覆盖率计算失败");
+                    }
+                }
+
+                using (Bitmap refineMask = new Bitmap(9, 9))
+                {
+                    using (Graphics graphics = Graphics.FromImage(refineMask))
+                    {
+                        graphics.Clear(Color.Black);
+                        graphics.FillRectangle(Brushes.White, 3, 3, 3, 3);
+                    }
+                    using (Bitmap expanded = ImageComposer.ExpandMask(refineMask, 1))
+                    using (Bitmap contracted = ImageComposer.ContractMask(refineMask, 1))
+                    using (Bitmap feathered = ImageComposer.FeatherMask(refineMask, 2))
+                    using (Bitmap smoothed = ImageComposer.SmoothMask(refineMask, 1))
+                    using (Bitmap outline = ImageCanvas.BuildOverlay(refineMask, MaskViewMode.Outline))
+                    {
+                        Assert(expanded.GetPixel(2, 4).R > 250 && expanded.GetPixel(1, 4).R < 5,
+                            "扩展选区半径计算失败");
+                        Assert(contracted.GetPixel(4, 4).R > 250 && contracted.GetPixel(3, 4).R < 5,
+                            "收缩选区半径计算失败");
+                        Assert(feathered.GetPixel(2, 4).R > 0 && feathered.GetPixel(2, 4).R < 255,
+                            "羽化选区没有产生柔和边缘");
+                        Assert((smoothed.GetPixel(4, 4).R == 0 || smoothed.GetPixel(4, 4).R == 255) &&
+                            (smoothed.GetPixel(2, 4).R == 0 || smoothed.GetPixel(2, 4).R == 255),
+                            "平滑选区输出不是二值蒙版");
+                        Assert(outline.GetPixel(3, 3).A > 0 &&
+                            outline.GetPixel(4, 4).A == 0 &&
+                            outline.GetPixel(0, 0).A == 0,
+                            "边缘预览没有只显示选区轮廓");
+                    }
+                }
+
+                GenerationPlan gptDefaultPlan = GenerationPlan.Create(ApiProvider.GptImage2, 1);
+                GenerationPlan nanoDefaultPlan = GenerationPlan.Create(ApiProvider.NanoBanana, 1);
+                GenerationPlan gptMultiPlan = GenerationPlan.Create(ApiProvider.GptImage2, 4);
+                GenerationPlan nanoMultiPlan = GenerationPlan.Create(ApiProvider.NanoBanana, 3);
+                Assert(gptDefaultPlan.CandidateCount == 1 && nanoDefaultPlan.CandidateCount == 1,
+                    "单候选模式必须为两个模型保留原有单次请求路径");
+                Assert(gptMultiPlan.CandidateCount == 4 && nanoMultiPlan.CandidateCount == 3,
+                    "多候选模式没有同时支持 GPT Image 2 与 Nano Banana");
+
+                string originalPrompt = "original repaint prompt remains untouched";
+                string gptRelightPrompt = ImageApiClient.BuildOperationPrompt(ApiProvider.GptImage2, GenerationOperation.Relight, "soft window light");
+                string nanoRelightPrompt = ImageApiClient.BuildOperationPrompt(ApiProvider.NanoBanana, GenerationOperation.Relight, "soft window light");
+                Assert(originalPrompt == "original repaint prompt remains untouched" &&
+                    gptRelightPrompt.IndexOf("facial features", StringComparison.Ordinal) >= 0 &&
+                    nanoRelightPrompt.IndexOf("facial features", StringComparison.Ordinal) >= 0 &&
+                    gptRelightPrompt.IndexOf("ghost remnants", StringComparison.Ordinal) >= 0 &&
+                    nanoRelightPrompt.IndexOf("ghost remnants", StringComparison.Ordinal) >= 0,
+                    "光影提示词没有同时覆盖双模型、人物保护或防重影约束");
+                Assert(ImageApiClient.BuildOperationPrompt(ApiProvider.GptImage2, GenerationOperation.Repaint, originalPrompt) == originalPrompt,
+                    "关闭独立工作流时不应改变原局部重绘提示词");
+
+                using (Bitmap relightSource = new Bitmap(24, 12, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                using (Bitmap relightGuide = new Bitmap(24, 12, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                using (Bitmap relightMask = new Bitmap(24, 12, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    for (int y = 0; y < relightSource.Height; y++)
+                    {
+                        for (int x = 0; x < relightSource.Width; x++)
+                        {
+                            int detail = (x + y) % 2 == 0 ? 60 : 105;
+                            relightSource.SetPixel(x, y, Color.FromArgb(255, detail, detail + 10, detail + 20));
+                            relightGuide.SetPixel(x, y, Color.FromArgb(255, 180, 155, 130));
+                            relightMask.SetPixel(x, y, x >= 8 ? Color.White : Color.Black);
+                        }
+                    }
+                    using (Bitmap relit = ImageComposer.RelightComposite(relightSource, relightGuide, relightMask, 92))
+                    {
+                        Assert(relit.GetPixel(3, 5).ToArgb() == relightSource.GetPixel(3, 5).ToArgb(),
+                            "光影重绘修改了蒙版外像素");
+                        int sourceContrast = relightSource.GetPixel(10, 4).R - relightSource.GetPixel(11, 4).R;
+                        int resultContrast = relit.GetPixel(10, 4).R - relit.GetPixel(11, 4).R;
+                        Assert(Math.Abs(sourceContrast - resultContrast) <= 3 &&
+                            relit.GetPixel(10, 4).ToArgb() != relightGuide.GetPixel(10, 4).ToArgb(),
+                            "光影合成没有保留原图高频细节，或直接采用了 AI 像素");
+                    }
+                    using (Bitmap secondMask = new Bitmap(24, 12, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                    {
+                        secondMask.SetPixel(2, 2, Color.White);
+                        using (Bitmap union = ImageComposer.UnionMasks(relightMask, secondMask))
+                            Assert(union.GetPixel(2, 2).R == 255 && union.GetPixel(12, 2).R == 255 && union.GetPixel(5, 2).R == 0,
+                                "串联工作流没有正确累计各步骤蒙版");
                     }
                 }
 
@@ -472,6 +591,20 @@ namespace PixelPatchStudio
                     serializedResponseFormat.IndexOf("\"imageSize\":\"4K\"", StringComparison.Ordinal) >= 0 &&
                     serializedResponseFormat.IndexOf("\"imageConfig\"", StringComparison.Ordinal) < 0,
                     "Nano Banana Response Format 请求体格式错误");
+                AppSettings genericRelaySettings = new AppSettings
+                {
+                    Provider = "Nano Banana",
+                    GeminiBaseUrl = "https://relay.example",
+                    GeminiEndpoint = "/v1beta/models/{model}:generateContent",
+                    GeminiModel = "gemini-image",
+                    GeminiImageSize = "4K",
+                    GeminiResolutionProtocol = "Auto"
+                };
+                string serializedGenericRelay = testJson.Serialize(ImageApiClient.BuildGeminiPayload(genericRelaySettings, "prompt", "source64", "mask64"));
+                Assert(serializedGenericRelay.IndexOf("\"imageConfig\"", StringComparison.Ordinal) >= 0 &&
+                    serializedGenericRelay.IndexOf("\"imageSize\":\"4K\"", StringComparison.Ordinal) >= 0 &&
+                    serializedGenericRelay.IndexOf("\"responseFormat\"", StringComparison.Ordinal) < 0,
+                    "generateContent 中转的自动分辨率协议没有使用标准 Image Config");
                 AppSettings interactionsSettings = new AppSettings
                 {
                     GeminiBaseUrl = "https://generativelanguage.googleapis.com",
@@ -489,6 +622,12 @@ namespace PixelPatchStudio
                 Assert(ImageApiClient.FindImageData(sampleGeminiResponse) == "aW1hZ2U=", "generateContent 图片响应解析失败");
                 object thinkingGeminiResponse = testJson.DeserializeObject("{\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"dGhvdWdodA==\"}},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"ZmluYWw=\"}}]}}]}");
                 Assert(ImageApiClient.FindImageData(thinkingGeminiResponse) == "ZmluYWw=", "没有优先使用 Gemini 最后一张最终图片");
+                object openAiStyleImageResponse = testJson.DeserializeObject("{\"data\":[{\"b64_json\":\"iVBORw0KGgoAAAANSUhEUg==\"}]}");
+                Assert(ImageApiClient.FindImageData(openAiStyleImageResponse) == "iVBORw0KGgoAAAANSUhEUg==",
+                    "Nano Banana 中转的 OpenAI 风格 b64_json 图片没有被识别");
+                object urlStyleImageResponse = testJson.DeserializeObject("{\"images\":[{\"image_url\":{\"url\":\"https://relay.example/result.png\"}}]}");
+                Assert(ImageApiClient.FindImageUrl(urlStyleImageResponse) == "https://relay.example/result.png",
+                    "Nano Banana 中转返回的图片 URL 没有被识别");
                 relaySettings.Provider = "Nano Banana";
                 relaySettings.GeminiResolutionProtocol = "Auto";
                 Assert(!string.IsNullOrEmpty(ImageApiClient.GeminiResolutionWarning(relaySettings, 842, 1264)) &&
@@ -529,6 +668,75 @@ namespace PixelPatchStudio
                     Assert(paintCanvas.DebugMaskPixel(800, 600).R < 15, "分块撤销失败");
                     paintCanvas.RedoMask();
                     Assert(paintCanvas.DebugMaskPixel(800, 600).R > 240, "分块重做失败");
+                }
+                using (Bitmap smartSource = new Bitmap(240, 160, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                using (ImageCanvas smartCanvas = new ImageCanvas())
+                {
+                    using (Graphics graphics = Graphics.FromImage(smartSource))
+                    using (Brush smartFill = new SolidBrush(Color.FromArgb(218, 228, 236)))
+                    using (Pen smartTail = new Pen(Color.FromArgb(218, 228, 236), 1f))
+                    {
+                        graphics.Clear(Color.FromArgb(24, 32, 42));
+                        graphics.FillPolygon(smartFill, new[]
+                        {
+                            new Point(42, 78), new Point(82, 34), new Point(158, 42),
+                            new Point(210, 86), new Point(154, 130), new Point(76, 118)
+                        });
+                        graphics.DrawLine(smartTail, 205, 86, 238, 86);
+                    }
+                    smartCanvas.Size = new Size(640, 480);
+                    smartCanvas.CreateControl();
+                    smartCanvas.SetImage(smartSource);
+                    smartCanvas.Tool = SelectionTool.SmartSelect;
+                    smartCanvas.BrushSize = 2;
+                    Rectangle smartCursorBounds = smartCanvas.DebugToolCursorBounds(new Point(100, 80));
+                    Assert(smartCursorBounds.Width >= 35 && smartCursorBounds.Height >= 35,
+                        "智能点选准星擦除范围仍依赖笔刷大小，可能产生绿色拖尾");
+                    smartCanvas.DebugSmartSelect(new PointF(120, 80), true);
+                    Assert(smartCanvas.DebugMaskPixel(120, 80).R > 240 &&
+                        smartCanvas.DebugMaskPixel(10, 10).R < 15,
+                        "智能点选没有把目标与背景分离");
+                    Assert(smartCanvas.DebugMaskPixel(235, 86).R < 15,
+                        "智能点选没有清理与主体相连的细长拖尾");
+                    smartCanvas.DebugSmartSelect(new PointF(120, 80), false);
+                    Assert(smartCanvas.DebugMaskPixel(120, 80).R < 15, "智能点选右键排除失败");
+                    smartCanvas.UndoMask();
+                    Assert(smartCanvas.DebugMaskPixel(120, 80).R > 240, "智能点选没有接入撤销历史");
+                }
+                using (Bitmap edgeSource = new Bitmap(240, 160, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                using (ImageCanvas lassoCanvas = new ImageCanvas())
+                {
+                    using (Graphics graphics = Graphics.FromImage(edgeSource))
+                    {
+                        graphics.Clear(Color.FromArgb(22, 28, 34));
+                        graphics.FillRectangle(Brushes.White, 120, 0, 120, 160);
+                    }
+                    lassoCanvas.Size = new Size(640, 480);
+                    lassoCanvas.CreateControl();
+                    lassoCanvas.SetImage(edgeSource);
+                    List<PointF> snapped = lassoCanvas.DebugSnapSegment(new PointF(112, 20), new PointF(112, 140));
+                    Assert(snapped.Count > 4 && snapped[snapped.Count / 2].X >= 116f && snapped[snapped.Count / 2].X <= 122f,
+                        "磁性套索没有吸附到高对比度边缘");
+                    List<PointF> polygon = new List<PointF>
+                    {
+                        new PointF(30, 30), new PointF(90, 30), new PointF(90, 100), new PointF(30, 100)
+                    };
+                    lassoCanvas.DebugApplyMagneticLasso(polygon, true);
+                    Assert(lassoCanvas.DebugMaskPixel(60, 60).R > 240 && lassoCanvas.DebugMaskPixel(10, 10).R < 15,
+                        "磁性套索没有创建封闭蒙版");
+                    lassoCanvas.DebugApplyMagneticLasso(polygon, false);
+                    Assert(lassoCanvas.DebugMaskPixel(60, 60).R < 15, "磁性套索排除模式失败");
+                    lassoCanvas.UndoMask();
+                    Assert(lassoCanvas.DebugMaskPixel(60, 60).R > 240, "磁性套索没有接入撤销历史");
+                    List<PointF> freehandPolygon = new List<PointF>
+                    {
+                        new PointF(140, 35), new PointF(210, 60), new PointF(175, 125), new PointF(132, 82)
+                    };
+                    lassoCanvas.DebugApplyFreehandLasso(freehandPolygon, true);
+                    Assert(lassoCanvas.DebugMaskPixel(170, 75).R > 240 && lassoCanvas.DebugMaskPixel(225, 140).R < 15,
+                        "自由套索没有创建非吸附封闭蒙版");
+                    lassoCanvas.UndoMask();
+                    Assert(lassoCanvas.DebugMaskPixel(170, 75).R < 15, "自由套索没有接入撤销历史");
                 }
                 Environment.SetEnvironmentVariable("PIXELPATCH_DATA_DIR", root);
                 SettingsStore store = new SettingsStore();

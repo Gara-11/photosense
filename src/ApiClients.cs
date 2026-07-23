@@ -183,8 +183,16 @@ namespace PixelPatchStudio
                             if (!response.IsSuccessStatusCode) throw ApiException(response, body, requestUrl);
                             object parsed = ParseJson(body);
                             string base64 = FindImageData(parsed);
-                            if (string.IsNullOrEmpty(base64)) throw new InvalidDataException("Nano Banana 响应中没有找到图片数据。");
-                            return BitmapFromBytes(Convert.FromBase64String(base64));
+                            if (!string.IsNullOrEmpty(base64))
+                                return BitmapFromBytes(Convert.FromBase64String(NormalizeImageBase64(base64)));
+                            string imageUrl = FindImageUrl(parsed);
+                            if (!string.IsNullOrEmpty(imageUrl))
+                            {
+                                if (imageUrl.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase))
+                                    return BitmapFromBytes(Convert.FromBase64String(NormalizeImageBase64(imageUrl)));
+                                return BitmapFromBytes(await DownloadBytesAsync(imageUrl, cancellationToken).ConfigureAwait(false));
+                            }
+                            throw new InvalidDataException(BuildMissingGeminiImageMessage(parsed, settings, requestUrl));
                         }
                     }
                     catch (OperationCanceledException ex)
@@ -211,9 +219,7 @@ namespace PixelPatchStudio
             string protocol = GeminiResolutionProtocol.Normalize(settings == null ? null : settings.GeminiResolutionProtocol);
             if (protocol == "ImageConfig") return true;
             if (protocol == "ResponseFormat") return false;
-            Uri baseUri;
-            return settings != null && Uri.TryCreate(settings.GeminiBaseUrl, UriKind.Absolute, out baseUri) &&
-                baseUri.Host.EndsWith("vectorengine.ai", StringComparison.OrdinalIgnoreCase);
+            return UsesGeminiGenerateContent(settings);
         }
 
         internal static string GeminiResolutionWarning(AppSettings settings, int width, int height)
@@ -367,6 +373,22 @@ namespace PixelPatchStudio
             return guarded + " Use the third image only for palette, lighting, texture and materials. Ignore every person, face, body, silhouette, subject, pose, clothing, object placement and composition in it. Do not add duplicate people, reflections, translucent figures, double exposures or ghost remnants.";
         }
 
+        internal static string BuildOperationPrompt(ApiProvider provider, GenerationOperation operation, string instruction)
+        {
+            string detail = (instruction ?? "").Trim();
+            string providerHint = provider == ApiProvider.NanoBanana
+                ? "Return one complete image aligned pixel-for-pixel with the first input image."
+                : "Return a complete image aligned pixel-for-pixel with the supplied original.";
+            string common = " Work only inside the selected mask. Preserve every unselected pixel, the exact camera, crop, perspective and composition. Never add duplicate people, extra limbs, reflections, translucent figures, double exposures or ghost remnants. " + providerHint;
+
+            if (operation == GenerationOperation.Relight)
+            {
+                return "Create a lighting-only guide for the selected area according to: " + detail +
+                    ". Change only low-frequency illumination, exposure, shadow direction, highlight balance and color temperature. Keep the person's exact identity, facial features, skin texture, hair strands, anatomy, pose, expression, clothing design, object geometry and all fine details unchanged. Do not beautify, retouch, reshape, repaint or replace anything." + common;
+            }
+            return detail;
+        }
+
         private static byte[] Png(Bitmap bitmap)
         {
             using (MemoryStream stream = new MemoryStream())
@@ -501,6 +523,8 @@ namespace PixelPatchStudio
 
         internal static string FindImageData(object node)
         {
+            string scalar = node as string;
+            if (LooksLikeImageBase64(scalar)) return scalar;
             string last = null;
             IDictionary<string, object> dictionary = node as IDictionary<string, object>;
             if (dictionary != null)
@@ -509,11 +533,32 @@ namespace PixelPatchStudio
                 object data;
                 bool image = (dictionary.TryGetValue("mime_type", out mime) || dictionary.TryGetValue("mimeType", out mime)) && Convert.ToString(mime).StartsWith("image/", StringComparison.OrdinalIgnoreCase);
                 if (image && dictionary.TryGetValue("data", out data) && data is string) last = (string)data;
+                string[] encodedNames = { "b64_json", "b64Json", "image_base64", "imageBase64", "base64", "result" };
+                foreach (string encodedName in encodedNames)
+                {
+                    object encoded;
+                    if (dictionary.TryGetValue(encodedName, out encoded) && encoded is string && LooksLikeImageBase64((string)encoded))
+                        last = (string)encoded;
+                }
                 object output;
                 if (dictionary.TryGetValue("output_image", out output))
                 {
                     IDictionary<string, object> imageObject = output as IDictionary<string, object>;
                     if (imageObject != null && imageObject.TryGetValue("data", out data) && data is string) last = (string)data;
+                    string outputString = output as string;
+                    if (LooksLikeImageBase64(outputString)) last = outputString;
+                }
+                string[] containerNames = { "inline_data", "inlineData", "image" };
+                foreach (string containerName in containerNames)
+                {
+                    object container;
+                    IDictionary<string, object> imageObject = dictionary.TryGetValue(containerName, out container)
+                        ? container as IDictionary<string, object>
+                        : null;
+                    if (imageObject != null && imageObject.TryGetValue("data", out data) && data is string && LooksLikeImageBase64((string)data))
+                        last = (string)data;
+                    string directImage = container as string;
+                    if (LooksLikeImageBase64(directImage)) last = directImage;
                 }
                 foreach (object child in dictionary.Values)
                 {
@@ -532,6 +577,85 @@ namespace PixelPatchStudio
                 }
             }
             return last;
+        }
+
+        internal static string FindImageUrl(object node)
+        {
+            string last = null;
+            IDictionary<string, object> dictionary = node as IDictionary<string, object>;
+            if (dictionary != null)
+            {
+                string[] urlNames = { "url", "image_url", "imageUrl", "output_url", "outputUrl" };
+                foreach (string urlName in urlNames)
+                {
+                    object value;
+                    string candidate = dictionary.TryGetValue(urlName, out value) ? value as string : null;
+                    if (IsImageResponseUrl(candidate)) last = candidate;
+                }
+                foreach (object child in dictionary.Values)
+                {
+                    string found = FindImageUrl(child);
+                    if (!string.IsNullOrEmpty(found)) last = found;
+                }
+                return last;
+            }
+            IEnumerable list = node as IEnumerable;
+            if (list != null && !(node is string))
+            {
+                foreach (object child in list)
+                {
+                    string found = FindImageUrl(child);
+                    if (!string.IsNullOrEmpty(found)) last = found;
+                }
+            }
+            return last;
+        }
+
+        private static bool IsImageResponseUrl(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            if (value.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase)) return true;
+            Uri uri;
+            return Uri.TryCreate(value, UriKind.Absolute, out uri) &&
+                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
+        }
+
+        private static bool LooksLikeImageBase64(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return false;
+            string normalized = NormalizeImageBase64(value);
+            return normalized.StartsWith("iVBOR", StringComparison.Ordinal) ||
+                normalized.StartsWith("/9j/", StringComparison.Ordinal) ||
+                normalized.StartsWith("R0lGOD", StringComparison.Ordinal) ||
+                normalized.StartsWith("UklGR", StringComparison.Ordinal) ||
+                normalized.StartsWith("Qk", StringComparison.Ordinal);
+        }
+
+        private static string NormalizeImageBase64(string value)
+        {
+            string normalized = (value ?? "").Trim();
+            if (!normalized.StartsWith("data:image/", StringComparison.OrdinalIgnoreCase)) return normalized;
+            int comma = normalized.IndexOf(',');
+            return comma >= 0 ? normalized.Substring(comma + 1).Trim() : normalized;
+        }
+
+        private static string BuildMissingGeminiImageMessage(object parsed, AppSettings settings, string requestUrl)
+        {
+            string message = FindNamedString(parsed, "message");
+            string blockReason = FindNamedString(parsed, "blockReason");
+            string finishReason = FindNamedString(parsed, "finishReason");
+            string text = FindNamedString(parsed, "text");
+            List<string> details = new List<string>();
+            if (!string.IsNullOrWhiteSpace(message)) details.Add("接口消息：" + Short(message));
+            if (!string.IsNullOrWhiteSpace(blockReason)) details.Add("拦截原因：" + Short(blockReason));
+            if (!string.IsNullOrWhiteSpace(finishReason)) details.Add("结束原因：" + Short(finishReason));
+            if (!string.IsNullOrWhiteSpace(text)) details.Add("文本响应：" + Short(text));
+            string detailText = details.Count == 0 ? "中转返回了成功状态，但响应中既没有 Base64 图片，也没有图片 URL。" : string.Join("\n", details.ToArray());
+            return "Nano Banana 中转没有返回可用图片。\n\n" + detailText +
+                "\n\n模型：" + (settings == null ? "" : settings.GeminiModel) +
+                "\n分辨率协议：" + (UsesGeminiImageConfig(settings) ? "Image Config" : "Response Format") +
+                "\n请求地址：" + requestUrl +
+                "\n\n如果出现计费规则、模型不可用或安全拦截信息，需要在中转后台更换支持该模型的渠道；PhotoSense 不会自动重试，以免重复扣费。";
         }
 
         private static string FindErrorMessage(string body)
